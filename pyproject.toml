@@ -1,0 +1,83 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "aixv"
+dynamic = ["version"]
+description = "The AI Integrity & Verification Protocol."
+readme = "README.md"
+requires-python = ">=3.8"
+license = "Apache-2.0"
+authors = [
+  { name = "AIXV Foundation", email = "admin@aixv.org" },
+]
+classifiers = [
+  "Development Status :: 2 - Pre-Alpha",
+  "Intended Audience :: Developers",
+  "Intended Audience :: Science/Research",
+  "Topic :: Security",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3",
+]
+keywords = ["ai", "provenance", "security", "integrity", "supply-chain", "verification"]
+dependencies = [
+  "typer>=0.9.0",
+  "rich>=13.0.0",
+  "pydantic>=2.0.0",
+  "sigstore>=4.2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0.0",
+  "ruff>=0.6.0",
+  "mypy>=1.10.0",
+  "build>=1.2.0",
+]
+
+[project.urls]
+Homepage = "https://aixv.org"
+Documentation = "https://aixv.org"
+Repository = "https://github.com/aixv-org/aixv"
+Issues = "https://github.com/aixv-org/aixv/issues"
+
+[project.scripts]
+aixv = "aixv.cli:app"
+
+[tool.hatch.version]
+path = "src/aixv/__init__.py"
+
+[tool.hatch.build.targets.sdist]
+exclude = [
+  "/.github",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/aixv"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py38"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "SIM"]
+ignore = ["E501"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.mypy]
+python_version = "3.10"
+ignore_missing_imports = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+disallow_untyped_defs = false
+check_untyped_defs = true
+no_implicit_optional = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]

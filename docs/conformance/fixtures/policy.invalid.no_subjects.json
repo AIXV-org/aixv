@@ -1,0 +1,6 @@
+{
+  "policy_type": "aixv.policy/v0",
+  "allow_subjects": [],
+  "allow_issuers": ["https://accounts.google.com"],
+  "require_signed_advisories": true
+}
