@@ -33,6 +33,14 @@ git push origin vX.Y.Z
 
 The `publish.yml` workflow reruns release gates and publishes to PyPI through trusted publishing.
 
+## PyPI Immutability Rule
+
+PyPI does not allow reusing a filename once it has existed, even if that file/version is later deleted.
+
+- Never delete published files expecting to reuse the same version.
+- If a publish attempt fails after artifacts are uploaded, bump to a new version and retag.
+- Keep `skip-existing: true` in publish workflow to make reruns safe for partially uploaded attempts.
+
 ## Post-Release
 
 - Verify package exists on PyPI.
