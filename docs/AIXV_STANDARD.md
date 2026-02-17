@@ -216,17 +216,20 @@ Policy outputs:
 - Breaking changes require new major version URI.
 - Verifiers SHOULD support at least one prior major version during migration.
 
-## 13. Interoperability Profiles
+## 13. Interoperability Assurance Levels
 
-AIXV profiles define strict subsets for predictable exchange:
-- `core-minimal`: sign + verify + training lineage
-- `core-enterprise`: adds advisories, policy decisions, rollback attestations
-- `core-regulated`: adds immutable retention and evidence export requirements
+AIXV assurance levels define strict subsets for predictable exchange:
+- `level-1`: sign + verify + training lineage
+- `level-2`: adds advisories, policy decisions, rollback attestations
+- `level-3`: adds immutable retention and evidence export requirements
+
+These levels are ordinal assurance tiers and do not encode assumptions about any
+specific sector, procurement regime, or legal jurisdiction.
 
 Export targets:
 - in-toto statements
 - SLSA provenance mappings
-- ML-BOM (SPDX/CycloneDX extension profile)
+- ML-BOM (SPDX/CycloneDX extension format)
 
 ## 14. Security Requirements
 
@@ -234,6 +237,7 @@ Export targets:
 - Clock skew tolerance MUST be explicit in verifier config.
 - Digest algorithm agility MUST be designed in (`sha256` required in v1).
 - Replay protection SHOULD check transparency log integrated time and bundle uniqueness.
+- Remote advisory ingestion SHOULD enforce monotonic integrated time per advisory ID and reject stale bundles by configured age.
 - All critical security decisions MUST be auditable with machine-readable reason codes.
 
 ## 15. Reference CLI Contract (v1)
@@ -242,7 +246,8 @@ Export targets:
 - `aixv attest <artifact> --predicate <type> --input <json>`
 - `aixv verify <artifact> [--policy <file>]`
 - `aixv provenance <artifact> [--depth N]`
-- `aixv advisory create|verify|list ...`
+- `aixv advisory create|verify|list|sync ...`
+- `aixv policy template|migrate|create|verify ...`
 - `aixv rollback <artifact> --to <digest>`
 - `aixv export <artifact> --format in-toto|slsa|ml-bom|aixv`
 

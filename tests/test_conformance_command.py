@@ -54,7 +54,14 @@ def test_conformance_command_passes_with_required_fixtures() -> None:
         assert payload["ok"] is True
         assert payload["schema"] == "aixv.conformance-report/v1"
         assert payload["overall_status"] == "pass"
-        assert len(payload["checks"]) >= 4
+        check_ids = {c["check_id"] for c in payload["checks"]}
+        assert "policy.unknown-field.reject.v1" in check_ids
+        assert "policy.advisory-trust.subject-fallback.v1" in check_ids
+        assert "advisory.signed-policy.filtering.v1" in check_ids
+        assert "bundle.schema.validation.v1" in check_ids
+        assert "advisory.sync.replay-freshness.v1" in check_ids
+        assert "crypto.invalid-bundle.artifact.reject.v1" in check_ids
+        assert "crypto.invalid-bundle.statement.reject.v1" in check_ids
 
 
 def test_conformance_command_fails_when_fixtures_missing() -> None:

@@ -1,12 +1,11 @@
 <p align="left">
   <img
-    src="https://www.aixv.org/AIXV-3.png"
-    alt="AIXV logo"
-    width="350"
+    src="https://www.aixv.org/AIXV-repo-banner.png"
+    alt="AIXV repository banner"
   />
 </p>
 
-# AIXV - AI Integrity Exchange & Verification
+# AIXV - AI Integrity eXchange & Verification
 <!--- @begin-badges@ --->
 [![CI](https://github.com/aixv-org/aixv/actions/workflows/ci.yml/badge.svg)](https://github.com/aixv-org/aixv/actions/workflows/ci.yml)
 [![Conformance](https://github.com/aixv-org/aixv/actions/workflows/conformance.yml/badge.svg)](https://github.com/aixv-org/aixv/actions/workflows/conformance.yml)
@@ -15,7 +14,7 @@
 [![PyPI version](https://badge.fury.io/py/aixv.svg)](https://pypi.org/project/aixv)
 <!--- @end-badges@ --->
 
-AIXV is an open standard for AI artifact attestation, provenance, rollback, compromise detection, and investigation.
+**AIXV** is an open standard for AI artifact attestation, provenance, rollback, compromise detection, and investigation.
 
 In practical terms, AIXV helps organizations answer high-stakes questions before deploying or accepting AI artifacts:
 - What exactly is this artifact?
@@ -26,20 +25,20 @@ In practical terms, AIXV helps organizations answer high-stakes questions before
 
 
 AIXV is built for three audiences that need shared, verifiable answers:
-- Technical teams: deterministic verification and machine-readable admission decisions.
-- Enterprise and public-sector risk owners: auditable evidence, policy controls, and incident traceability.
-- Policy, governance, and assurance functions: explicit trust assumptions, conformance checks, and compatibility contracts.
+- **Technical teams**: deterministic verification and machine-readable admission decisions.
+- **Enterprise and public-sector risk owners**: auditable evidence, policy controls, and incident traceability.
+- **Policy, governance, and assurance functions**: explicit trust assumptions, conformance checks, and compatibility contracts.
 
 AIXV composes Sigstore cryptographic primitives and adds AI-native semantics:
-- artifact typing,
-- lineage graphs,
+- Artifact typing,
+- Lineage graphs,
 - ML-specific attestations,
-- advisory/recall workflows,
-- and policy-driven verification.
+- Advisory/recall workflows,
+- Policy-driven verification.
 
 ## Release Posture
 
-Current maturity: **Pre-alpha**.
+Current maturity: **Pre-Alpha**
 
 This repository is a functional preview of the AIXV standard, but not yet a final ratified standard release.
 
@@ -71,16 +70,16 @@ For security and procurement reviews, the strongest immediate signals are:
 
 - `docs/AIXV_STANDARD.md`
 - `docs/NORMATIVE_CORE.md`
-- `docs/QUALITY_BAR.md`
+- `docs/QUALITY.md`
 - `docs/THREAT_MODEL.md`
-- `SECURITY.md`
 - `docs/COMPATIBILITY.md`
 - `docs/TERMINOLOGY.md`
 - `docs/REGISTRIES.md`
-- `docs/PROFILES.md`
+- `docs/ASSURANCE_LEVELS.md`
 - `docs/CONFORMANCE.md`
 - `docs/GOVERNANCE.md`
 - `docs/REPO_CONTROLS.md`
+- `SECURITY.md`
 - `RELEASE.md`
 
 ## Installation
@@ -102,29 +101,67 @@ aixv policy create --input policy.json --sign
 aixv verify model.safetensors \
   --policy .aixv/policies/policy.json \
   --policy-trusted-subject security-policy@aixv.org \
+  --assurance-level level-2 \
   --json
 
 # 4) Run conformance checks
 aixv conformance --json
+
+# 5) Optional: enforce signed-and-trusted attestations in lineage/export flows
+aixv provenance model.safetensors \
+  --require-signed-attestations \
+  --trusted-attestation-subject ci-attestations@aixv.org \
+  --json
 ```
 
 ## CLI Surface
 
 ```bash
+# Version
 aixv version
+
+# Signing
 aixv sign model.safetensors --identity-token-env SIGSTORE_ID_TOKEN
+
+# Verification
 aixv verify model.safetensors --identity alice@example.com --issuer https://accounts.google.com
+
+# Attestation
 aixv attest model.safetensors --predicate training --input training.json
+
+# Provenance
 aixv provenance model.safetensors --depth 3
+aixv provenance model.safetensors --view explain --depth 3 --json
+
+# Advisory
 aixv advisory create --advisory-id ADV-2026-0001 --severity critical --input advisory.json --sign
 aixv advisory verify .aixv/advisories/ADV-2026-0001.json --trusted-subject security@aixv.org
+aixv advisory sync --feed advisory-feed.json --trusted-subject security@aixv.org --max-bundle-age-days 30
+
+# Policy
 aixv policy create --input policy.json --sign
 aixv policy verify .aixv/policies/policy.json --trusted-subject security-policy@aixv.org
+aixv policy template --assurance-level level-2 --json
+aixv policy migrate --input policy.json --to-assurance-level level-3 --max-bundle-age-days 30
+
+# Record
 aixv record create --kind waiver --record-id WVR-2026-01 --input waiver.json --sign
 aixv record verify .aixv/policies/policy.json --kind policy --trusted-subject security-policy@aixv.org
+
+# Bundle
+aixv bundle create --input bundle.json --sign
+aixv bundle verify .aixv/records/bundle/bundle-main.json --trusted-subject release@aixv.org
+
+# Conformance
 aixv conformance --json
-aixv rollback model-v2.safetensors --to sha256:...
+
+# Rollback
+aixv rollback model-v2.safetensors --to sha256:... --identity-token-env SIGSTORE_ID_TOKEN
+
+# Export
 aixv export model.safetensors --format in-toto
+aixv export model.safetensors --format slsa --json
+aixv export model.safetensors --format ml-bom --json
 ```
 
 ## Policy Example

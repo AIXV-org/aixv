@@ -72,7 +72,7 @@ Decision:
 - Evidence remains queryable via stored attestations/advisories/signatures.
 
 Status:
-- Implemented as explicit rollback event record; lineage expansion ongoing.
+- Implemented as explicit rollback event record and signed by default (`rollback --sign` default true); lineage expansion ongoing.
 
 ## 7. "Over-flexible tooling leads to insecure defaults"
 
@@ -88,8 +88,66 @@ Decision:
 Status:
 - Implemented; further hardening planned with signed remote feeds.
 
+## 8. "Signed attestations are emitted but not enforced downstream"
+
+Risk:
+- Provenance/export views could include unsigned or untrusted attestation claims without explicit operator intent.
+
+Decision:
+- Added strict mode for lineage/export flows:
+  - `--require-signed-attestations`
+  - trusted signer subject/issuer constraints for attestation verification.
+- Signed attestation verification uses Sigstore DSSE verification and requires payload match with stored statements.
+
+Status:
+- Implemented in `provenance` and `export` CLI flows.
+
+## 9. "Assurance levels are documented but not enforced"
+
+Risk:
+- Organizations cannot reliably prove they are operating in a specific assurance level.
+
+Decision:
+- Added verifier assurance-level gates:
+  - `verify --assurance-level level-1`
+  - `verify --assurance-level level-2`
+  - `verify --assurance-level level-3`
+- Levels are ordinal control tiers, not labels for specific sectors or regulatory regimes.
+- Assurance-level gates enforce required policy controls and signed-control-plane constraints.
+
+Status:
+- Implemented.
+
+## 10. "Lineage investigation needs explicit trace/impact/explain modes"
+
+Risk:
+- Operators cannot quickly pivot from compromised ancestor to impacted descendants or produce compact explanations.
+
+Decision:
+- `provenance` now supports:
+  - `--view trace` (ancestors),
+  - `--view impact` (descendants),
+  - `--view explain` (condensed trust/advisory evidence).
+
+Status:
+- Implemented.
+
+## 11. "Single-file trust is not enough for model releases"
+
+Risk:
+- Real releases ship multiple artifacts (weights, tokenizer, config); single-artifact trust checks are insufficient.
+
+Decision:
+- Added strict signed bundle records (`kind=bundle`, `aixv.bundle/v1`) with:
+  - canonical digest normalization,
+  - primary-member consistency,
+  - signature verification and optional required-member checks.
+
+Status:
+- Implemented via `bundle create` and `bundle verify`.
+
 ## Next hardening steps
 
-1. Add signed remote advisory feed ingestion with replay/freshness protection.
-2. Add conformance test vectors for every failure mode above.
-3. Add compatibility profile gates (`core-minimal`, `core-enterprise`, `core-regulated`).
+1. Add authenticated advisory feed discovery/rotation (beyond direct feed URL ingestion).
+2. Add conformance vectors for additional malformed feed and rollback edge cases.
+3. Add organization-ready policy packs built on `policy template`/`policy migrate`.

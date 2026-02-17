@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
+from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -16,6 +18,7 @@ from cryptography.x509 import (
 from cryptography.x509.oid import NameOID
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sigstore.dsse import Statement
+from sigstore.hashes import HashAlgorithm, Hashed
 from sigstore.models import Bundle, ClientTrustConfig
 from sigstore.oidc import IdentityToken, Issuer
 from sigstore.sign import SigningContext
@@ -31,6 +34,9 @@ PREDICATE_ALIASES: Dict[str, str] = {
 ALLOWED_SEVERITIES = {"low", "medium", "high", "critical"}
 ALLOWED_ADVISORY_STATUS = {"active", "mitigated", "withdrawn"}
 SEVERITY_RANK = {"low": 1, "medium": 2, "high": 3, "critical": 4}
+ATTESTATION_RECORD_SCHEMA = "aixv.attestation-record/v1"
+ALLOWED_ASSURANCE_LEVELS = {"level-1", "level-2", "level-3"}
+RECORD_ID_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 
 
 class ParentModel(BaseModel):
@@ -99,6 +105,26 @@ class AdvisoryPredicate(BaseModel):
             raise ValueError(f"invalid severity: {self.severity}")
         if self.status not in ALLOWED_ADVISORY_STATUS:
             raise ValueError(f"invalid status: {self.status}")
+
+
+class ArtifactBundle(BaseModel):
+    bundle_type: str = "aixv.bundle/v1"
+    bundle_id: str
+    primary: str
+    members: List[str] = Field(min_length=1)
+
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    def model_post_init(self, __context: Any) -> None:
+        self.primary = normalize_sha256_digest(self.primary)
+        normalized_members: List[str] = []
+        for member in self.members:
+            digest = normalize_sha256_digest(member)
+            if digest not in normalized_members:
+                normalized_members.append(digest)
+        if self.primary not in normalized_members:
+            normalized_members.append(self.primary)
+        self.members = normalized_members
 
 
 class VerifyPolicy(BaseModel):
@@ -181,6 +207,28 @@ def normalize_sha256_digest(value: str) -> str:
     return f"sha256:{token}"
 
 
+def _normalize_string_list(raw: Any) -> List[str]:
+    if not isinstance(raw, list):
+        return []
+    out: List[str] = []
+    for item in raw:
+        if not isinstance(item, str):
+            continue
+        value = item.strip()
+        if value and value not in out:
+            out.append(value)
+    return out
+
+
+def validate_record_id(record_id: str) -> str:
+    token = record_id.strip()
+    if not RECORD_ID_PATTERN.fullmatch(token):
+        raise ValueError(
+            "invalid record_id: must match ^[A-Za-z0-9._-]{1,128}$ and must not include path separators"
+        )
+    return token
+
+
 def ensure_artifact(path: str) -> Path:
     artifact = Path(path)
     if not artifact.exists():
@@ -202,7 +250,7 @@ def write_json(path: Path, payload: Dict[str, Any]) -> None:
         f.write("\n")
 
 
-def sha256_file(path: Path) -> str:
+def _sha256_file_digest(path: Path) -> bytes:
     h = hashlib.sha256()
     with path.open("rb") as f:
         while True:
@@ -210,7 +258,15 @@ def sha256_file(path: Path) -> str:
             if not chunk:
                 break
             h.update(chunk)
-    return f"sha256:{h.hexdigest()}"
+    return h.digest()
+
+
+def sha256_file(path: Path) -> str:
+    return f"sha256:{_sha256_file_digest(path).hex()}"
+
+
+def sigstore_hashed_input(path: Path) -> Hashed:
+    return Hashed(algorithm=HashAlgorithm.SHA2_256, digest=_sha256_file_digest(path))
 
 
 def bundle_path_for(artifact: Path) -> Path:
@@ -253,6 +309,75 @@ def validate_policy_payload(raw: Dict[str, Any]) -> Dict[str, Any]:
     except ValidationError as e:
         raise ValueError(str(e))
     return parsed.model_dump()
+
+
+def validate_bundle_payload(raw: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        parsed = ArtifactBundle.model_validate(raw)
+    except ValidationError as e:
+        raise ValueError(str(e))
+    return parsed.model_dump()
+
+
+def advisory_trust_constraints_from_policy(policy: Dict[str, Any]) -> Dict[str, List[str]]:
+    subjects = _normalize_string_list(policy.get("advisory_allow_subjects"))
+    issuers = _normalize_string_list(policy.get("advisory_allow_issuers"))
+
+    if not subjects:
+        subjects = _normalize_string_list(policy.get("allow_subjects"))
+    if not subjects:
+        subject = policy.get("subject")
+        if isinstance(subject, str) and subject.strip():
+            subjects = [subject.strip()]
+
+    if not issuers:
+        issuers = _normalize_string_list(policy.get("allow_issuers"))
+    if not issuers:
+        issuer = policy.get("issuer")
+        if isinstance(issuer, str) and issuer.strip():
+            issuers = [issuer.strip()]
+
+    return {"subjects": subjects, "issuers": issuers}
+
+
+def evaluate_assurance_level_requirements(
+    *,
+    assurance_level: Optional[str],
+    policy_provided: bool,
+    require_signed_policy: bool,
+    policy: Dict[str, Any],
+) -> List[str]:
+    if assurance_level is None:
+        return []
+    if assurance_level not in ALLOWED_ASSURANCE_LEVELS:
+        return [f"unsupported assurance level: {assurance_level}"]
+
+    violations: List[str] = []
+    if assurance_level in {"level-2", "level-3"}:
+        if not policy_provided:
+            violations.append(f"assurance level {assurance_level} requires --policy")
+        if not require_signed_policy:
+            violations.append(
+                f"assurance level {assurance_level} requires signed policy verification"
+            )
+        if not bool(policy.get("require_signed_advisories", False)):
+            violations.append(
+                f"assurance level {assurance_level} requires require_signed_advisories=true"
+            )
+        advisory_trust = advisory_trust_constraints_from_policy(policy)
+        if len(advisory_trust["subjects"]) < 1:
+            violations.append(
+                f"assurance level {assurance_level} requires advisory trust subjects via "
+                "advisory_allow_subjects or subject/allow_subjects"
+            )
+
+    if assurance_level == "level-3":
+        if policy.get("max_bundle_age_days") is None:
+            violations.append("assurance level level-3 requires max_bundle_age_days")
+        if not bool(policy.get("require_no_active_advisories", False)):
+            violations.append("assurance level level-3 requires require_no_active_advisories=true")
+
+    return violations
 
 
 def resolve_predicate_uri(predicate: str) -> str:
@@ -332,12 +457,13 @@ def sign_artifact_with_sigstore(
         else ClientTrustConfig.production(offline=offline)
     )
     ctx = SigningContext.from_trust_config(trust_config)
+    hashed_input = sigstore_hashed_input(artifact)
     with ctx.signer(token, cache=True) as signer:
-        bundle = signer.sign_artifact(artifact.read_bytes())
+        bundle = signer.sign_artifact(hashed_input)
     bundle_out.write_text(bundle.to_json(), encoding="utf-8")
     return {
         "bundle_path": str(bundle_out),
-        "digest": sha256_file(artifact),
+        "digest": f"sha256:{hashed_input.digest.hex()}",
         "identity": {"subject": token.identity, "issuer": token.issuer},
         "staging": staging,
     }
@@ -378,6 +504,19 @@ def sign_statement_with_sigstore(
     }
 
 
+def _bundle_integrated_time(bundle: Bundle) -> Optional[str]:
+    if bundle.log_entry and bundle.log_entry._inner.integrated_time:
+        return (
+            datetime.fromtimestamp(
+                bundle.log_entry._inner.integrated_time,
+                tz=timezone.utc,
+            )
+            .replace(microsecond=0)
+            .isoformat()
+        )
+    return None
+
+
 def verify_artifact_with_sigstore(
     *,
     artifact: Path,
@@ -399,24 +538,66 @@ def verify_artifact_with_sigstore(
         allow_subjects=allow_subjects or [],
         allow_issuers=allow_issuers or [],
     )
-    verifier.verify_artifact(artifact.read_bytes(), bundle, identity_policy)
+    hashed_input = sigstore_hashed_input(artifact)
+    verifier.verify_artifact(hashed_input, bundle, identity_policy)
     cert = bundle.signing_certificate
     subject_candidates = _extract_subject_candidates(cert)
     issuer_value = _extract_oidc_issuer(cert)
-    integrated_time = None
-    if bundle.log_entry and bundle.log_entry._inner.integrated_time:
-        integrated_time = (
-            datetime.fromtimestamp(
-                bundle.log_entry._inner.integrated_time,
-                tz=timezone.utc,
-            )
-            .replace(microsecond=0)
-            .isoformat()
-        )
+    integrated_time = _bundle_integrated_time(bundle)
     return {
         "verified": True,
-        "digest": sha256_file(artifact),
+        "digest": f"sha256:{hashed_input.digest.hex()}",
         "bundle_path": str(bundle_in),
+        "expected_subject": subject,
+        "expected_issuer": issuer,
+        "actual_subjects": subject_candidates,
+        "actual_issuer": issuer_value,
+        "integrated_time": integrated_time,
+        "staging": staging,
+    }
+
+
+def verify_statement_with_sigstore(
+    *,
+    statement: Dict[str, Any],
+    bundle_in: Path,
+    subject: Optional[str],
+    issuer: Optional[str],
+    allow_subjects: Optional[List[str]] = None,
+    allow_issuers: Optional[List[str]] = None,
+    staging: bool,
+    offline: bool,
+) -> Dict[str, Any]:
+    bundle = Bundle.from_json(bundle_in.read_text(encoding="utf-8"))
+    verifier = (
+        Verifier.staging(offline=offline) if staging else Verifier.production(offline=offline)
+    )
+    identity_policy = build_sigstore_identity_policy(
+        subject=subject,
+        issuer=issuer,
+        allow_subjects=allow_subjects or [],
+        allow_issuers=allow_issuers or [],
+    )
+    payload_type, payload_bytes = verifier.verify_dsse(bundle, identity_policy)
+    try:
+        verified_statement = json.loads(payload_bytes.decode("utf-8"))
+    except Exception as exc:
+        raise ValueError(f"verified DSSE payload is not valid UTF-8 JSON: {exc}") from exc
+    if not isinstance(verified_statement, dict):
+        raise ValueError("verified DSSE payload is not a JSON object statement")
+    if verified_statement.get("_type") != "https://in-toto.io/Statement/v1":
+        raise ValueError("verified DSSE payload is not an in-toto Statement/v1")
+    if verified_statement != statement:
+        raise ValueError("verified DSSE payload does not match expected statement content")
+
+    cert = bundle.signing_certificate
+    subject_candidates = _extract_subject_candidates(cert)
+    issuer_value = _extract_oidc_issuer(cert)
+    integrated_time = _bundle_integrated_time(bundle)
+    return {
+        "verified": True,
+        "bundle_path": str(bundle_in),
+        "payload_type": payload_type,
         "expected_subject": subject,
         "expected_issuer": issuer,
         "actual_subjects": subject_candidates,
@@ -459,27 +640,187 @@ def create_attestation_record(
     artifact: Path,
     predicate_uri: str,
     statement: Dict[str, Any],
+    signature_bundle_path: Optional[str] = None,
 ) -> Path:
     digest = sha256_file(artifact).replace(":", "_")
     parts = predicate_uri.rstrip("/").split("/")
     key = f"{parts[-2]}.{parts[-1]}" if len(parts) >= 2 else parts[-1]
     path = attestation_store(root) / f"{digest}.{key}.json"
-    write_json(path, statement)
+    write_json(
+        path,
+        {
+            "schema": ATTESTATION_RECORD_SCHEMA,
+            "created_at": now_iso(),
+            "predicate_type": predicate_uri,
+            "statement": statement,
+            "signature_bundle_path": signature_bundle_path,
+        },
+    )
     return path
 
 
-def load_attestations_for_digest(root: Path, digest: str) -> List[Dict[str, Any]]:
+def _statement_has_subject_digest(statement: Dict[str, Any], digest: str) -> bool:
+    target = normalize_sha256_digest(digest)
+    subjects = statement.get("subject", [])
+    if not isinstance(subjects, list):
+        return False
+    for subject in subjects:
+        if not isinstance(subject, dict):
+            continue
+        subject_digest = subject.get("digest")
+        if not isinstance(subject_digest, dict):
+            continue
+        token = subject_digest.get("sha256")
+        if not isinstance(token, str):
+            continue
+        try:
+            if normalize_sha256_digest(token) == target:
+                return True
+        except ValueError:
+            continue
+    return False
+
+
+def load_attestation_records_for_digest(root: Path, digest: str) -> List[Dict[str, Any]]:
     needle = digest.replace(":", "_")
+    target = normalize_sha256_digest(digest)
     results: List[Dict[str, Any]] = []
     store = attestation_store(root)
     if not store.exists():
         return results
     for path in sorted(store.glob(f"{needle}.*.json")):
         try:
-            results.append(read_json(str(path)))
+            raw = read_json(str(path))
         except Exception:
             continue
+        statement: Optional[Dict[str, Any]] = None
+        signature_bundle_path: Optional[str] = None
+        if isinstance(raw, dict) and raw.get("schema") == ATTESTATION_RECORD_SCHEMA:
+            statement_candidate = raw.get("statement")
+            if isinstance(statement_candidate, dict):
+                statement = statement_candidate
+            bundle_candidate = raw.get("signature_bundle_path")
+            if isinstance(bundle_candidate, str) and bundle_candidate.strip():
+                signature_bundle_path = bundle_candidate
+        elif isinstance(raw, dict):
+            statement = raw
+            bundle_candidate = raw.get("signature_bundle_path")
+            if isinstance(bundle_candidate, str) and bundle_candidate.strip():
+                signature_bundle_path = bundle_candidate
+        if not isinstance(statement, dict):
+            continue
+        if not _statement_has_subject_digest(statement, target):
+            continue
+        if not signature_bundle_path:
+            default_bundle = path.with_name(f"{path.name}.sigstore.json")
+            if default_bundle.exists():
+                signature_bundle_path = str(default_bundle)
+        results.append(
+            {
+                "path": str(path),
+                "statement": statement,
+                "signature_bundle_path": signature_bundle_path,
+            }
+        )
     return results
+
+
+def load_attestations_for_digest(root: Path, digest: str) -> List[Dict[str, Any]]:
+    results: List[Dict[str, Any]] = []
+    for entry in load_attestation_records_for_digest(root, digest):
+        statement = entry.get("statement")
+        if isinstance(statement, dict):
+            results.append(statement)
+    return results
+
+
+def load_all_attestation_records(root: Path) -> List[Dict[str, Any]]:
+    results: List[Dict[str, Any]] = []
+    store = attestation_store(root)
+    if not store.exists():
+        return results
+    for path in sorted(store.glob("*.json")):
+        try:
+            raw = read_json(str(path))
+        except Exception:
+            continue
+        statement: Optional[Dict[str, Any]] = None
+        signature_bundle_path: Optional[str] = None
+        if isinstance(raw, dict) and raw.get("schema") == ATTESTATION_RECORD_SCHEMA:
+            candidate = raw.get("statement")
+            if isinstance(candidate, dict):
+                statement = candidate
+            bundle_candidate = raw.get("signature_bundle_path")
+            if isinstance(bundle_candidate, str) and bundle_candidate.strip():
+                signature_bundle_path = bundle_candidate
+        elif isinstance(raw, dict):
+            statement = raw
+            bundle_candidate = raw.get("signature_bundle_path")
+            if isinstance(bundle_candidate, str) and bundle_candidate.strip():
+                signature_bundle_path = bundle_candidate
+        if not isinstance(statement, dict):
+            continue
+        if not signature_bundle_path:
+            default_bundle = path.with_name(f"{path.name}.sigstore.json")
+            if default_bundle.exists():
+                signature_bundle_path = str(default_bundle)
+        results.append(
+            {
+                "path": str(path),
+                "statement": statement,
+                "signature_bundle_path": signature_bundle_path,
+            }
+        )
+    return results
+
+
+def summarize_training_lineage_from_attestations(
+    attestations: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    parent_digests: List[str] = []
+    dataset_digests: List[str] = []
+    training_runs: List[Dict[str, Any]] = []
+
+    for att in attestations:
+        if att.get("predicateType") != PREDICATE_ALIASES["training"]:
+            continue
+        predicate = att.get("predicate", {})
+        if not isinstance(predicate, dict):
+            continue
+        for parent in predicate.get("parent_models", []):
+            if not isinstance(parent, dict):
+                continue
+            token = parent.get("digest")
+            if not isinstance(token, str):
+                continue
+            try:
+                digest = normalize_sha256_digest(token)
+            except ValueError:
+                continue
+            if digest not in parent_digests:
+                parent_digests.append(digest)
+        for dataset in predicate.get("datasets", []):
+            if not isinstance(dataset, dict):
+                continue
+            token = dataset.get("digest")
+            if not isinstance(token, str):
+                continue
+            try:
+                digest = normalize_sha256_digest(token)
+            except ValueError:
+                continue
+            if digest not in dataset_digests:
+                dataset_digests.append(digest)
+        run = predicate.get("training_run")
+        if isinstance(run, dict):
+            training_runs.append(run)
+
+    return {
+        "parent_digests": parent_digests,
+        "dataset_digests": dataset_digests,
+        "training_run_count": len(training_runs),
+        "training_runs": training_runs,
+    }
 
 
 def create_advisory_record(
@@ -553,31 +894,38 @@ def list_advisories(
                 continue
             if normalized_candidate == target:
                 signed_and_trusted = False
+                bundle_ref: Optional[Path] = None
                 if bundle_path and isinstance(bundle_path, str):
-                    bundle_ref = Path(bundle_path)
-                    if not bundle_ref.is_absolute():
-                        bundle_ref = path.parent / bundle_ref
-                    if bundle_ref.exists():
-                        try:
-                            verify_artifact_with_sigstore(
-                                artifact=path,
-                                bundle_in=bundle_ref,
-                                subject=None,
-                                issuer=None,
-                                allow_subjects=trusted_subjects or [],
-                                allow_issuers=trusted_issuers or [],
-                                staging=staging,
-                                offline=offline,
-                            )
-                            signed_and_trusted = True
-                        except Exception:
-                            signed_and_trusted = False
+                    candidate_ref = Path(bundle_path)
+                    if not candidate_ref.is_absolute():
+                        candidate_ref = path.parent / candidate_ref
+                    if candidate_ref.exists():
+                        bundle_ref = candidate_ref
+                if bundle_ref is None:
+                    default_bundle = path.with_name(f"{path.name}.sigstore.json")
+                    if default_bundle.exists():
+                        bundle_ref = default_bundle
+                if bundle_ref is not None and bundle_ref.exists():
+                    try:
+                        verify_artifact_with_sigstore(
+                            artifact=path,
+                            bundle_in=bundle_ref,
+                            subject=None,
+                            issuer=None,
+                            allow_subjects=trusted_subjects or [],
+                            allow_issuers=trusted_issuers or [],
+                            staging=staging,
+                            offline=offline,
+                        )
+                        signed_and_trusted = True
+                    except Exception:
+                        signed_and_trusted = False
                 if require_signed and not signed_and_trusted:
                     break
                 advisory = dict(advisory)
                 advisory["_trust"] = {
                     "signed_and_trusted": signed_and_trusted,
-                    "signature_bundle_path": bundle_path,
+                    "signature_bundle_path": str(bundle_ref) if bundle_ref else bundle_path,
                 }
                 out.append(advisory)
                 break
@@ -618,7 +966,8 @@ def resolve_signature_bundle_path(record_path: Path, explicit_bundle: Optional[s
                 bundle_ref = Path(record.signature_bundle_path)
                 if not bundle_ref.is_absolute():
                     bundle_ref = record_path.parent / bundle_ref
-                return bundle_ref
+                if bundle_ref.exists():
+                    return bundle_ref
     except Exception:
         pass
     return record_path.with_name(f"{record_path.name}.sigstore.json")
@@ -655,6 +1004,8 @@ def validate_record_payload(kind: str, payload: Dict[str, Any]) -> Dict[str, Any
         return validate_policy_payload(payload)
     if kind == "advisory":
         return validate_predicate(PREDICATE_ALIASES["advisory"], payload)
+    if kind == "bundle":
+        return validate_bundle_payload(payload)
     return payload
 
 
@@ -717,13 +1068,18 @@ def create_record(
     output_path: Optional[str] = None,
     signature_bundle_path: Optional[str] = None,
 ) -> Path:
+    normalized_record_id = validate_record_id(record_id)
     record = create_signed_record_payload(
         kind=kind,
-        record_id=record_id,
+        record_id=normalized_record_id,
         payload=payload,
         signature_bundle_path=signature_bundle_path,
     )
-    path = Path(output_path) if output_path else record_store(root, kind) / f"{record_id}.json"
+    path = (
+        Path(output_path)
+        if output_path
+        else record_store(root, kind) / f"{normalized_record_id}.json"
+    )
     write_json(path, record)
     return path
 
@@ -748,6 +1104,142 @@ def detect_parents_from_training_attestations(
         for parent in predicate.get("parent_models", []):
             parents.append(parent)
     return parents
+
+
+def trace_training_lineage_parents(
+    root: Path, artifact_digest: str, depth: int
+) -> List[Dict[str, Any]]:
+    if depth < 1:
+        return []
+    start = normalize_sha256_digest(artifact_digest)
+    visited = {start}
+    frontier = deque([(start, 1)])
+    out: List[Dict[str, Any]] = []
+
+    while frontier:
+        child_digest, current_depth = frontier.popleft()
+        attestations = load_attestations_for_digest(root, child_digest)
+        parents = detect_parents_from_training_attestations(attestations)
+        for parent in parents:
+            if not isinstance(parent, dict):
+                continue
+            candidate = parent.get("digest")
+            if not isinstance(candidate, str):
+                continue
+            try:
+                normalized_parent = normalize_sha256_digest(candidate)
+            except ValueError:
+                continue
+            entry = dict(parent)
+            entry["digest"] = normalized_parent
+            entry["child_digest"] = child_digest
+            entry["depth"] = current_depth
+            out.append(entry)
+            if current_depth < depth and normalized_parent not in visited:
+                visited.add(normalized_parent)
+                frontier.append((normalized_parent, current_depth + 1))
+
+    return out
+
+
+def trace_training_lineage_descendants(
+    root: Path, artifact_digest: str, depth: int
+) -> List[Dict[str, Any]]:
+    if depth < 1:
+        return []
+    start = normalize_sha256_digest(artifact_digest)
+    edges: Dict[str, List[str]] = {}
+    for entry in load_all_attestation_records(root):
+        statement = entry.get("statement")
+        if not isinstance(statement, dict):
+            continue
+        subjects = statement.get("subject", [])
+        if not isinstance(subjects, list):
+            continue
+        subject_digests: List[str] = []
+        for subject in subjects:
+            if not isinstance(subject, dict):
+                continue
+            digest_map = subject.get("digest")
+            if not isinstance(digest_map, dict):
+                continue
+            token = digest_map.get("sha256")
+            if not isinstance(token, str):
+                continue
+            try:
+                subject_digests.append(normalize_sha256_digest(token))
+            except ValueError:
+                continue
+        if not subject_digests:
+            continue
+        summary = summarize_training_lineage_from_attestations([statement])
+        parent_digests = summary["parent_digests"]
+        for parent in parent_digests:
+            edges.setdefault(parent, [])
+            for child in subject_digests:
+                if child not in edges[parent]:
+                    edges[parent].append(child)
+
+    visited = {start}
+    frontier = deque([(start, 1)])
+    out: List[Dict[str, Any]] = []
+
+    while frontier:
+        parent, current_depth = frontier.popleft()
+        for child in edges.get(parent, []):
+            out.append({"digest": child, "parent_digest": parent, "depth": current_depth})
+            if current_depth < depth and child not in visited:
+                visited.add(child)
+                frontier.append((child, current_depth + 1))
+
+    return out
+
+
+def _sha256_hex_token(digest: str) -> str:
+    return normalize_sha256_digest(digest).split(":", 1)[1]
+
+
+def export_attestations_as_slsa(
+    *, artifact_digest: str, artifact_name: str, attestations: List[Dict[str, Any]]
+) -> Dict[str, Any]:
+    summary = summarize_training_lineage_from_attestations(attestations)
+    materials = summary["parent_digests"] + summary["dataset_digests"]
+    out_materials: List[Dict[str, Any]] = []
+    for digest in materials:
+        out_materials.append({"uri": digest, "digest": {"sha256": _sha256_hex_token(digest)}})
+    return {
+        "predicateType": "https://slsa.dev/provenance/v1",
+        "subject": [
+            {"name": artifact_name, "digest": {"sha256": _sha256_hex_token(artifact_digest)}}
+        ],
+        "buildDefinition": {
+            "buildType": "aixv/training",
+            "externalParameters": {"attestation_count": len(attestations)},
+            "resolvedDependencies": out_materials,
+        },
+        "runDetails": {
+            "builder": {"id": "aixv"},
+            "metadata": {"training_run_count": summary["training_run_count"]},
+        },
+    }
+
+
+def export_attestations_as_ml_bom(
+    *, artifact_digest: str, artifact_name: str, attestations: List[Dict[str, Any]]
+) -> Dict[str, Any]:
+    summary = summarize_training_lineage_from_attestations(attestations)
+    components: List[Dict[str, Any]] = [
+        {"name": artifact_name, "digest": artifact_digest, "role": "model"}
+    ]
+    for digest in summary["parent_digests"]:
+        components.append({"digest": digest, "role": "parent-model"})
+    for digest in summary["dataset_digests"]:
+        components.append({"digest": digest, "role": "dataset"})
+    return {
+        "bom_format": "aixv.ml-bom/v1",
+        "component_count": len(components),
+        "components": components,
+    }
 
 
 def _extract_subject_candidates(cert: Any) -> List[str]:
@@ -861,13 +1353,68 @@ def evaluate_freshness_policy(
     return violations
 
 
+def evaluate_advisory_sync_guards(
+    *,
+    integrated_time: Optional[str],
+    previous_integrated_time: Optional[str],
+    max_age_days: Optional[int],
+    now: Optional[datetime] = None,
+) -> List[str]:
+    violations: List[str] = []
+    if integrated_time is None:
+        return ["advisory sync requires bundle integrated time"]
+    try:
+        observed = datetime.fromisoformat(integrated_time)
+    except Exception:
+        return ["advisory sync integrated_time is invalid"]
+    if observed.tzinfo is None:
+        observed = observed.replace(tzinfo=timezone.utc)
+    observed = observed.astimezone(timezone.utc)
+
+    if previous_integrated_time is not None:
+        try:
+            previous = datetime.fromisoformat(previous_integrated_time)
+            if previous.tzinfo is None:
+                previous = previous.replace(tzinfo=timezone.utc)
+            previous = previous.astimezone(timezone.utc)
+            if observed <= previous:
+                violations.append(
+                    "advisory replay/stale update detected: integrated_time did not advance"
+                )
+        except Exception:
+            violations.append("advisory sync state integrated_time is invalid")
+
+    if max_age_days is not None:
+        if max_age_days < 1:
+            violations.append("max_age_days must be >= 1")
+        else:
+            now_ts = now or datetime.now(tz=timezone.utc)
+            if now_ts.tzinfo is None:
+                now_ts = now_ts.replace(tzinfo=timezone.utc)
+            age = now_ts.astimezone(timezone.utc) - observed
+            if age.total_seconds() > int(max_age_days) * 86400:
+                violations.append(f"advisory bundle age exceeds max_age_days ({max_age_days})")
+
+    return violations
+
+
 def evaluate_advisory_policy(
     *,
     policy: Dict[str, Any],
     advisories: List[Dict[str, Any]],
 ) -> List[str]:
     violations: List[str] = []
-    active = [a for a in advisories if a.get("status") == "active"]
+    require_signed = bool(policy.get("require_signed_advisories", False))
+    considered = advisories
+    if require_signed:
+        considered = [
+            a
+            for a in advisories
+            if isinstance(a.get("_trust"), dict)
+            and a.get("_trust", {}).get("signed_and_trusted") is True
+        ]
+
+    active = [a for a in considered if a.get("status") == "active"]
     if policy.get("require_no_active_advisories") and active:
         violations.append("active advisories present while require_no_active_advisories=true")
 
