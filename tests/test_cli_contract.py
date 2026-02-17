@@ -460,3 +460,50 @@ def test_advisory_sync_rejects_replay_integrated_time(monkeypatch) -> None:
         assert second_out["ok"] is False
         assert second_out["rejected_count"] == 1
         assert "replay/stale" in second_out["results"][0]["error"]
+
+
+def test_advisory_sync_rejects_http_feed_reference() -> None:
+    result = runner.invoke(
+        app,
+        [
+            "advisory",
+            "sync",
+            "--feed",
+            "http://example.com/advisory-feed.json",
+            "--trusted-subject",
+            "security@aixv.org",
+            "--json",
+        ],
+    )
+    assert result.exit_code == 1
+    out = json.loads(result.stdout)
+    assert out["ok"] is False
+    assert out["command"] == "advisory sync"
+    assert "only https://" in out["error"]
+
+
+def test_record_create_rejects_unsafe_record_id() -> None:
+    with runner.isolated_filesystem():
+        Path("waiver.json").write_text(
+            json.dumps({"reason": "temporary exception"}),
+            encoding="utf-8",
+        )
+        result = runner.invoke(
+            app,
+            [
+                "record",
+                "create",
+                "--kind",
+                "waiver",
+                "--record-id",
+                "../escape",
+                "--input",
+                "waiver.json",
+                "--json",
+            ],
+        )
+        assert result.exit_code == 1
+        out = json.loads(result.stdout)
+        assert out["ok"] is False
+        assert out["command"] == "record create"
+        assert "invalid record_id" in out["error"]

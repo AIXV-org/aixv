@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
@@ -35,6 +36,7 @@ ALLOWED_ADVISORY_STATUS = {"active", "mitigated", "withdrawn"}
 SEVERITY_RANK = {"low": 1, "medium": 2, "high": 3, "critical": 4}
 ATTESTATION_RECORD_SCHEMA = "aixv.attestation-record/v1"
 ALLOWED_ASSURANCE_LEVELS = {"level-1", "level-2", "level-3"}
+RECORD_ID_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 
 
 class ParentModel(BaseModel):
@@ -216,6 +218,15 @@ def _normalize_string_list(raw: Any) -> List[str]:
         if value and value not in out:
             out.append(value)
     return out
+
+
+def validate_record_id(record_id: str) -> str:
+    token = record_id.strip()
+    if not RECORD_ID_PATTERN.fullmatch(token):
+        raise ValueError(
+            "invalid record_id: must match ^[A-Za-z0-9._-]{1,128}$ and must not include path separators"
+        )
+    return token
 
 
 def ensure_artifact(path: str) -> Path:
@@ -1057,13 +1068,18 @@ def create_record(
     output_path: Optional[str] = None,
     signature_bundle_path: Optional[str] = None,
 ) -> Path:
+    normalized_record_id = validate_record_id(record_id)
     record = create_signed_record_payload(
         kind=kind,
-        record_id=record_id,
+        record_id=normalized_record_id,
         payload=payload,
         signature_bundle_path=signature_bundle_path,
     )
-    path = Path(output_path) if output_path else record_store(root, kind) / f"{record_id}.json"
+    path = (
+        Path(output_path)
+        if output_path
+        else record_store(root, kind) / f"{normalized_record_id}.json"
+    )
     write_json(path, record)
     return path
 

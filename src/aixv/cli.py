@@ -38,6 +38,7 @@ from aixv.core import (
     trace_training_lineage_parents,
     validate_policy_payload,
     validate_predicate,
+    validate_record_id,
     validate_record_payload,
     verify_artifact_with_sigstore,
     verify_signed_record,
@@ -79,6 +80,8 @@ def _is_remote_ref(ref: str) -> bool:
 
 
 def _read_bytes_from_ref(ref: str) -> bytes:
+    if ref.startswith("http://"):
+        raise ValueError("insecure remote reference: only https:// is allowed")
     if _is_remote_ref(ref):
         with urlopen(ref, timeout=20) as response:  # nosec B310 - expected remote feed access
             return response.read()
@@ -967,8 +970,8 @@ def advisory_sync(
             raise ValueError("max_bundle_age_days must be >= 1")
 
         feed_payload = _read_json_from_ref(feed)
-        if feed_payload.get("schema") not in {None, "aixv.advisory-feed/v1"}:
-            raise ValueError("unsupported feed schema")
+        if feed_payload.get("schema") != "aixv.advisory-feed/v1":
+            raise ValueError("feed schema must be aixv.advisory-feed/v1")
         entries = _parse_advisory_feed_entries(feed_payload)
 
         root = _root_dir()
@@ -1005,8 +1008,9 @@ def advisory_sync(
                         offline=offline,
                     )
 
+                safe_advisory_id = validate_record_id(advisory.record_id)
                 previous_integrated = None
-                existing = sync_entries.get(advisory.record_id)
+                existing = sync_entries.get(safe_advisory_id)
                 if isinstance(existing, dict):
                     token = existing.get("integrated_time")
                     if isinstance(token, str):
@@ -1019,12 +1023,12 @@ def advisory_sync(
                 if guard_violations:
                     raise ValueError("; ".join(guard_violations))
 
-                record_out = advisories_dir / f"{advisory.record_id}.json"
-                bundle_out = advisories_dir / f"{advisory.record_id}.json.sigstore.json"
+                record_out = advisories_dir / f"{safe_advisory_id}.json"
+                bundle_out = advisories_dir / f"{safe_advisory_id}.json.sigstore.json"
                 record_out.write_bytes(record_bytes)
                 bundle_out.write_bytes(bundle_bytes)
 
-                sync_entries[advisory.record_id] = {
+                sync_entries[safe_advisory_id] = {
                     "integrated_time": verification.get("integrated_time"),
                     "updated_at": datetime.now(tz=timezone.utc).replace(microsecond=0).isoformat(),
                     "source_record": record_ref,
@@ -1033,7 +1037,7 @@ def advisory_sync(
                 imported += 1
                 results.append(
                     {
-                        "advisory_id": advisory.record_id,
+                        "advisory_id": safe_advisory_id,
                         "status": "imported",
                         "integrated_time": verification.get("integrated_time"),
                         "path": str(record_out),

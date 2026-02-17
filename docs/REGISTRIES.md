@@ -16,6 +16,9 @@ Registration guidance:
 - New kinds should be lowercase kebab-case.
 - Kind semantics must define expected payload schema and trust implications.
 
+Record ID guidance:
+- `record_id` should match `^[A-Za-z0-9._-]{1,128}$`.
+
 ## 2. Predicate URI Registry
 
 Current predicate aliases:
@@ -56,5 +59,6 @@ Required fields:
 
 Operational semantics:
 - Each entry must verify against trusted signer subjects before import.
+- Remote feed and entry URLs must use `https://` (or be local file paths).
 - Replay/stale updates are rejected when integrated time does not advance.
 - Optional freshness guard rejects bundles older than configured max age.
