@@ -26,16 +26,16 @@ In practical terms, AIXV helps organizations answer high-stakes questions before
 
 
 AIXV is built for three audiences that need shared, verifiable answers:
-- Technical teams: deterministic verification and machine-readable admission decisions.
-- Enterprise and public-sector risk owners: auditable evidence, policy controls, and incident traceability.
-- Policy, governance, and assurance functions: explicit trust assumptions, conformance checks, and compatibility contracts.
+- **Technical teams**: deterministic verification and machine-readable admission decisions.
+- **Enterprise and public-sector risk owners**: auditable evidence, policy controls, and incident traceability.
+- **Policy, governance, and assurance functions**: explicit trust assumptions, conformance checks, and compatibility contracts.
 
 AIXV composes Sigstore cryptographic primitives and adds AI-native semantics:
-- artifact typing,
-- lineage graphs,
+- Artifact typing,
+- Lineage graphs,
 - ML-specific attestations,
-- advisory/recall workflows,
-- and policy-driven verification.
+- Advisory/recall workflows,
+- Policy-driven verification.
 
 ## Release Posture
 
