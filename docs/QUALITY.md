@@ -14,6 +14,7 @@ This document defines core quality requirements for production-grade provenance 
 - Advisories are treated as signed records (`kind=advisory`) and can be required-signed by policy.
 - Multi-artifact bundles are represented as signed bundle records (`kind=bundle`, `aixv.bundle/v1`).
 - When `require_signed_advisories=true`, only signed-and-trusted advisories influence admission outcomes.
+- Advisory feed ingestion (`advisory sync`) rejects replayed/stale updates and supports max-age freshness checks.
 - Rollback records are signed by default (`rollback --sign`), preserving append-only evidence.
 - Admission decisions are explicit and machine-readable (`allow|deny`, violations, evidence).
 

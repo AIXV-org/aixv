@@ -33,3 +33,7 @@ Includes `level-2`, plus:
 - Enforcement gate: `verify --assurance-level level-3` additionally requires:
   - `max_bundle_age_days`,
   - `require_no_active_advisories=true`.
+
+Operational helpers:
+- `policy template --assurance-level <level>` generates a baseline policy payload.
+- `policy migrate --to-assurance-level <level>` upgrades existing policy payloads while preserving explicit trust roots.

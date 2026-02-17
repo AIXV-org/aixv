@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -9,6 +10,7 @@ from aixv.core import (
     create_signed_record_payload,
     evaluate_admission,
     evaluate_advisory_policy,
+    evaluate_advisory_sync_guards,
     evaluate_assurance_level_requirements,
     export_attestations_as_ml_bom,
     export_attestations_as_slsa,
@@ -109,6 +111,25 @@ def test_evaluate_advisory_policy_uses_only_trusted_when_signed_required() -> No
     assert evaluate_advisory_policy(policy=policy, advisories=trusted_active) == [
         "active advisories present while require_no_active_advisories=true"
     ]
+
+
+def test_evaluate_advisory_sync_guards_rejects_replay() -> None:
+    violations = evaluate_advisory_sync_guards(
+        integrated_time="2026-02-16T00:00:00+00:00",
+        previous_integrated_time="2026-02-16T00:00:00+00:00",
+        max_age_days=None,
+    )
+    assert any("replay/stale" in v for v in violations)
+
+
+def test_evaluate_advisory_sync_guards_rejects_stale_bundle() -> None:
+    violations = evaluate_advisory_sync_guards(
+        integrated_time="2026-01-01T00:00:00+00:00",
+        previous_integrated_time=None,
+        max_age_days=7,
+        now=datetime(2026, 2, 1, tzinfo=timezone.utc),
+    )
+    assert any("max_age_days" in v for v in violations)
 
 
 def test_attestation_record_roundtrip_preserves_statement_and_bundle(tmp_path: Path) -> None:

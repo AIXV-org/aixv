@@ -338,3 +338,125 @@ def test_bundle_verify_requires_trusted_subject_constraints() -> None:
         assert out["ok"] is False
         assert out["command"] == "bundle verify"
         assert "trusted subject constraints required" in out["error"]
+
+
+def test_policy_template_level_3_requires_max_bundle_age() -> None:
+    result = runner.invoke(
+        app,
+        ["policy", "template", "--assurance-level", "level-3", "--json"],
+    )
+    assert result.exit_code == 1
+    out = json.loads(result.stdout)
+    assert out["ok"] is False
+    assert out["command"] == "policy template"
+    assert "max-bundle-age-days" in out["error"]
+
+
+def test_policy_migrate_level_3_requires_bundle_age_if_missing() -> None:
+    with runner.isolated_filesystem():
+        Path("policy.json").write_text(
+            json.dumps(
+                {
+                    "policy_type": "aixv.policy/v1",
+                    "allow_subjects": ["alice@example.com"],
+                }
+            ),
+            encoding="utf-8",
+        )
+        result = runner.invoke(
+            app,
+            [
+                "policy",
+                "migrate",
+                "--input",
+                "policy.json",
+                "--to-assurance-level",
+                "level-3",
+                "--json",
+            ],
+        )
+        assert result.exit_code == 1
+        out = json.loads(result.stdout)
+        assert out["ok"] is False
+        assert out["command"] == "policy migrate"
+        assert "max_bundle_age_days" in out["error"]
+
+
+def test_advisory_sync_rejects_replay_integrated_time(monkeypatch) -> None:
+    with runner.isolated_filesystem():
+        advisory_record = {
+            "schema": "aixv.signed-record/v1",
+            "kind": "advisory",
+            "record_id": "ADV-2026-0001",
+            "created_at": "2026-02-16T00:00:00+00:00",
+            "payload": {
+                "advisory_id": "ADV-2026-0001",
+                "affected": [{"digest": f"sha256:{'1' * 64}"}],
+                "severity": "high",
+                "status": "active",
+                "reason_code": "model-compromise",
+                "recommended_actions": ["rollback"],
+            },
+            "signature_bundle_path": None,
+        }
+        Path("remote-advisory.json").write_text(json.dumps(advisory_record), encoding="utf-8")
+        Path("remote-advisory.sigstore.json").write_text("{}", encoding="utf-8")
+        Path("feed.json").write_text(
+            json.dumps(
+                {
+                    "schema": "aixv.advisory-feed/v1",
+                    "entries": [
+                        {
+                            "record": "remote-advisory.json",
+                            "bundle": "remote-advisory.sigstore.json",
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        def _fake_verify_signed_record(*args, **kwargs):
+            return {
+                "verified": True,
+                "integrated_time": "2026-02-16T00:00:00+00:00",
+                "actual_subjects": ["security@aixv.org"],
+                "actual_issuer": "https://accounts.google.com",
+            }
+
+        monkeypatch.setattr("aixv.cli.verify_signed_record", _fake_verify_signed_record)
+
+        first = runner.invoke(
+            app,
+            [
+                "advisory",
+                "sync",
+                "--feed",
+                "feed.json",
+                "--trusted-subject",
+                "security@aixv.org",
+                "--json",
+            ],
+        )
+        assert first.exit_code == 0
+        first_out = json.loads(first.stdout)
+        assert first_out["ok"] is True
+        assert first_out["imported_count"] == 1
+
+        second = runner.invoke(
+            app,
+            [
+                "advisory",
+                "sync",
+                "--feed",
+                "feed.json",
+                "--trusted-subject",
+                "security@aixv.org",
+                "--json",
+            ],
+        )
+        assert second.exit_code == 1
+        second_out = json.loads(second.stdout)
+        assert second_out["ok"] is False
+        assert second_out["rejected_count"] == 1
+        assert "replay/stale" in second_out["results"][0]["error"]

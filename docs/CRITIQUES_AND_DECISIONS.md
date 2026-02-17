@@ -148,6 +148,6 @@ Status:
 
 ## Next hardening steps
 
-1. Add signed remote advisory feed ingestion with replay/freshness protection.
-2. Add conformance test vectors for every failure mode above.
-3. Add policy templates and migration tooling for organizations adopting `level-1` -> `level-3`.
+1. Add authenticated advisory feed discovery/rotation (beyond direct feed URL ingestion).
+2. Add conformance vectors for additional malformed feed and rollback edge cases.
+3. Add organization-ready policy packs built on `policy template`/`policy migrate`.

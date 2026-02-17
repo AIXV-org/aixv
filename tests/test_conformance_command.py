@@ -59,6 +59,7 @@ def test_conformance_command_passes_with_required_fixtures() -> None:
         assert "policy.advisory-trust.subject-fallback.v1" in check_ids
         assert "advisory.signed-policy.filtering.v1" in check_ids
         assert "bundle.schema.validation.v1" in check_ids
+        assert "advisory.sync.replay-freshness.v1" in check_ids
         assert "crypto.invalid-bundle.artifact.reject.v1" in check_ids
         assert "crypto.invalid-bundle.statement.reject.v1" in check_ids
 

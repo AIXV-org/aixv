@@ -126,8 +126,11 @@ aixv provenance model.safetensors --depth 3
 aixv provenance model.safetensors --view explain --depth 3 --json
 aixv advisory create --advisory-id ADV-2026-0001 --severity critical --input advisory.json --sign
 aixv advisory verify .aixv/advisories/ADV-2026-0001.json --trusted-subject security@aixv.org
+aixv advisory sync --feed advisory-feed.json --trusted-subject security@aixv.org --max-bundle-age-days 30
 aixv policy create --input policy.json --sign
 aixv policy verify .aixv/policies/policy.json --trusted-subject security-policy@aixv.org
+aixv policy template --assurance-level level-2 --json
+aixv policy migrate --input policy.json --to-assurance-level level-3 --max-bundle-age-days 30
 aixv record create --kind waiver --record-id WVR-2026-01 --input waiver.json --sign
 aixv record verify .aixv/policies/policy.json --kind policy --trusted-subject security-policy@aixv.org
 aixv bundle create --input bundle.json --sign

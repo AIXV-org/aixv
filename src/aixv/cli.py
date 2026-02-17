@@ -1,6 +1,9 @@
 import json
+from datetime import datetime, timezone
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any, Dict, List, Optional
+from urllib.request import urlopen
 
 import typer
 from rich.console import Console
@@ -14,6 +17,7 @@ from aixv.core import (
     create_record,
     ensure_artifact,
     evaluate_admission,
+    evaluate_advisory_sync_guards,
     evaluate_assurance_level_requirements,
     export_attestations_as_ml_bom,
     export_attestations_as_slsa,
@@ -68,6 +72,67 @@ def _parse_csv_values(raw: Optional[str]) -> list:
     if not raw:
         return []
     return [s.strip() for s in raw.split(",") if s.strip()]
+
+
+def _is_remote_ref(ref: str) -> bool:
+    return ref.startswith("https://") or ref.startswith("http://")
+
+
+def _read_bytes_from_ref(ref: str) -> bytes:
+    if _is_remote_ref(ref):
+        with urlopen(ref, timeout=20) as response:  # nosec B310 - expected remote feed access
+            return response.read()
+    return Path(ref).read_bytes()
+
+
+def _read_json_from_ref(ref: str) -> Dict[str, Any]:
+    raw = _read_bytes_from_ref(ref)
+    payload = json.loads(raw.decode("utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("feed payload must be a JSON object")
+    return payload
+
+
+def _parse_advisory_feed_entries(payload: Dict[str, Any]) -> List[Dict[str, str]]:
+    entries_raw: Any = payload.get("entries")
+    if isinstance(entries_raw, list):
+        entries = entries_raw
+    else:
+        raise ValueError("feed payload must include entries[]")
+
+    out: List[Dict[str, str]] = []
+    for index, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            raise ValueError(f"feed entry {index} must be an object")
+        record_ref = entry.get("record") or entry.get("record_url")
+        bundle_ref = entry.get("bundle") or entry.get("bundle_url")
+        if not isinstance(record_ref, str) or not record_ref.strip():
+            raise ValueError(f"feed entry {index} missing record reference")
+        if not isinstance(bundle_ref, str) or not bundle_ref.strip():
+            raise ValueError(f"feed entry {index} missing bundle reference")
+        out.append({"record": record_ref.strip(), "bundle": bundle_ref.strip()})
+    return out
+
+
+def _advisory_sync_state_path(root: Path) -> Path:
+    return root / ".aixv" / "advisory-sync-state.json"
+
+
+def _load_advisory_sync_state(root: Path) -> Dict[str, Any]:
+    path = _advisory_sync_state_path(root)
+    if not path.exists():
+        return {"schema": "aixv.advisory-sync-state/v1", "entries": {}}
+    payload = read_json(str(path))
+    if not isinstance(payload, dict):
+        raise ValueError("invalid advisory sync state format")
+    entries = payload.get("entries")
+    if not isinstance(entries, dict):
+        raise ValueError("invalid advisory sync state entries")
+    return payload
+
+
+def _save_advisory_sync_state(root: Path, payload: Dict[str, Any]) -> None:
+    write_json(_advisory_sync_state_path(root), payload)
 
 
 def _resolve_bundle_reference(record_path: Path, bundle_ref: Optional[str]) -> Optional[Path]:
@@ -869,6 +934,142 @@ def advisory_verify(
         raise typer.Exit(code=1)
 
 
+@advisory_app.command("sync")
+def advisory_sync(
+    feed: str = typer.Option(
+        ...,
+        help="Path/URL to advisory feed JSON (schema aixv.advisory-feed/v1 with entries[])",
+    ),
+    trusted_subject: Optional[str] = typer.Option(None, help="Trusted advisory signer subject"),
+    trusted_subjects: Optional[str] = typer.Option(
+        None, help="Comma-separated trusted advisory signer subjects"
+    ),
+    trusted_issuers: Optional[str] = typer.Option(
+        None, help="Comma-separated trusted advisory signer issuers"
+    ),
+    max_bundle_age_days: Optional[int] = typer.Option(
+        None, help="Reject advisories with bundle integrated time older than N days"
+    ),
+    staging: bool = typer.Option(False, help="Use Sigstore staging instance"),
+    offline: bool = typer.Option(False, help="Use cached trust root only"),
+    json_output: bool = typer.Option(False, "--json", help="Deterministic JSON output"),
+):
+    """Ingest signed advisories from a feed with replay/freshness protection."""
+    try:
+        subject_list = []
+        if trusted_subject:
+            subject_list.append(trusted_subject)
+        subject_list.extend(_parse_csv_values(trusted_subjects))
+        issuer_list = _parse_csv_values(trusted_issuers)
+        if len(subject_list) < 1:
+            raise ValueError("trusted subject constraints required")
+        if max_bundle_age_days is not None and max_bundle_age_days < 1:
+            raise ValueError("max_bundle_age_days must be >= 1")
+
+        feed_payload = _read_json_from_ref(feed)
+        if feed_payload.get("schema") not in {None, "aixv.advisory-feed/v1"}:
+            raise ValueError("unsupported feed schema")
+        entries = _parse_advisory_feed_entries(feed_payload)
+
+        root = _root_dir()
+        advisories_dir = root / ".aixv" / "advisories"
+        advisories_dir.mkdir(parents=True, exist_ok=True)
+        sync_state = _load_advisory_sync_state(root)
+        sync_entries = sync_state.setdefault("entries", {})
+        if not isinstance(sync_entries, dict):
+            raise ValueError("invalid advisory sync state entries")
+
+        results: List[Dict[str, Any]] = []
+        imported = 0
+        for entry in entries:
+            record_ref = entry["record"]
+            bundle_ref = entry["bundle"]
+            try:
+                record_bytes = _read_bytes_from_ref(record_ref)
+                bundle_bytes = _read_bytes_from_ref(bundle_ref)
+                with TemporaryDirectory() as tmp:
+                    tmp_dir = Path(tmp)
+                    tmp_record = tmp_dir / "record.json"
+                    tmp_bundle = tmp_dir / "record.sigstore.json"
+                    tmp_record.write_bytes(record_bytes)
+                    tmp_bundle.write_bytes(bundle_bytes)
+
+                    advisory = load_signed_record(str(tmp_record), expected_kind="advisory")
+                    validate_predicate(PREDICATE_ALIASES["advisory"], advisory.payload)
+                    verification = verify_signed_record(
+                        record_path=tmp_record,
+                        bundle_path=tmp_bundle,
+                        trusted_subjects=subject_list,
+                        trusted_issuers=issuer_list,
+                        staging=staging,
+                        offline=offline,
+                    )
+
+                previous_integrated = None
+                existing = sync_entries.get(advisory.record_id)
+                if isinstance(existing, dict):
+                    token = existing.get("integrated_time")
+                    if isinstance(token, str):
+                        previous_integrated = token
+                guard_violations = evaluate_advisory_sync_guards(
+                    integrated_time=verification.get("integrated_time"),
+                    previous_integrated_time=previous_integrated,
+                    max_age_days=max_bundle_age_days,
+                )
+                if guard_violations:
+                    raise ValueError("; ".join(guard_violations))
+
+                record_out = advisories_dir / f"{advisory.record_id}.json"
+                bundle_out = advisories_dir / f"{advisory.record_id}.json.sigstore.json"
+                record_out.write_bytes(record_bytes)
+                bundle_out.write_bytes(bundle_bytes)
+
+                sync_entries[advisory.record_id] = {
+                    "integrated_time": verification.get("integrated_time"),
+                    "updated_at": datetime.now(tz=timezone.utc).replace(microsecond=0).isoformat(),
+                    "source_record": record_ref,
+                    "source_bundle": bundle_ref,
+                }
+                imported += 1
+                results.append(
+                    {
+                        "advisory_id": advisory.record_id,
+                        "status": "imported",
+                        "integrated_time": verification.get("integrated_time"),
+                        "path": str(record_out),
+                        "bundle_path": str(bundle_out),
+                    }
+                )
+            except Exception as exc:
+                results.append(
+                    {
+                        "record": record_ref,
+                        "bundle": bundle_ref,
+                        "status": "rejected",
+                        "error": str(exc),
+                    }
+                )
+
+        _save_advisory_sync_state(root, sync_state)
+        rejected = [r for r in results if r.get("status") == "rejected"]
+        payload = {
+            "ok": len(rejected) == 0,
+            "feed": feed,
+            "entry_count": len(entries),
+            "imported_count": imported,
+            "rejected_count": len(rejected),
+            "results": results,
+        }
+        _emit(payload, json_output)
+        if rejected:
+            raise typer.Exit(code=1)
+    except typer.Exit:
+        raise
+    except Exception as e:
+        _emit({"ok": False, "error": str(e), "command": "advisory sync"}, json_output)
+        raise typer.Exit(code=1)
+
+
 @record_app.command("verify")
 def record_verify(
     record: str = typer.Argument(..., help="Path to signed record JSON"),
@@ -970,6 +1171,186 @@ def record_create(
         _emit(result, json_output)
     except Exception as e:
         _emit({"ok": False, "error": str(e), "command": "record create"}, json_output)
+        raise typer.Exit(code=1)
+
+
+def _policy_template_for_assurance_level(
+    *,
+    assurance_level: str,
+    advisory_subject_overrides: List[str],
+    max_bundle_age_days: Optional[int],
+) -> Dict[str, Any]:
+    if assurance_level not in {"level-1", "level-2", "level-3"}:
+        raise ValueError(f"unsupported assurance level: {assurance_level}")
+    if max_bundle_age_days is not None and max_bundle_age_days < 1:
+        raise ValueError("max_bundle_age_days must be >= 1")
+
+    policy: Dict[str, Any] = {
+        "policy_type": "aixv.policy/v1",
+        "allow_subjects": ["REPLACE_WITH_TRUSTED_SUBJECT"],
+    }
+    if assurance_level == "level-1":
+        policy["require_signed_advisories"] = False
+    if assurance_level in {"level-2", "level-3"}:
+        policy["require_signed_advisories"] = True
+        policy["advisory_allow_subjects"] = (
+            advisory_subject_overrides
+            if advisory_subject_overrides
+            else ["REPLACE_WITH_TRUSTED_ADVISORY_SIGNER"]
+        )
+    if assurance_level == "level-3":
+        if max_bundle_age_days is None:
+            raise ValueError("level-3 template requires --max-bundle-age-days")
+        policy["max_bundle_age_days"] = max_bundle_age_days
+        policy["require_no_active_advisories"] = True
+
+    validated = validate_policy_payload(policy)
+    violations = evaluate_assurance_level_requirements(
+        assurance_level=assurance_level,
+        policy_provided=True,
+        require_signed_policy=True,
+        policy=validated,
+    )
+    if violations:
+        raise ValueError("; ".join(violations))
+    return validated
+
+
+def _migrate_policy_to_assurance_level(
+    *,
+    policy: Dict[str, Any],
+    assurance_level: str,
+    advisory_subject_overrides: List[str],
+    max_bundle_age_days: Optional[int],
+) -> Dict[str, Any]:
+    if assurance_level not in {"level-1", "level-2", "level-3"}:
+        raise ValueError(f"unsupported assurance level: {assurance_level}")
+    if max_bundle_age_days is not None and max_bundle_age_days < 1:
+        raise ValueError("max_bundle_age_days must be >= 1")
+
+    migrated: Dict[str, Any] = dict(policy)
+    if assurance_level in {"level-2", "level-3"}:
+        migrated["require_signed_advisories"] = True
+        if advisory_subject_overrides:
+            migrated["advisory_allow_subjects"] = advisory_subject_overrides
+        advisory_trust = advisory_trust_constraints_from_policy(migrated)
+        if len(advisory_trust["subjects"]) < 1:
+            raise ValueError(
+                "level-2/level-3 migration requires advisory trust subjects; "
+                "set policy subject/allow_subjects or pass --advisory-trusted-subject(s)"
+            )
+    if assurance_level == "level-3":
+        migrated["require_no_active_advisories"] = True
+        if max_bundle_age_days is not None:
+            migrated["max_bundle_age_days"] = max_bundle_age_days
+        elif migrated.get("max_bundle_age_days") is None:
+            raise ValueError(
+                "level-3 migration requires max_bundle_age_days; pass --max-bundle-age-days"
+            )
+
+    validated = validate_policy_payload(migrated)
+    violations = evaluate_assurance_level_requirements(
+        assurance_level=assurance_level,
+        policy_provided=True,
+        require_signed_policy=True,
+        policy=validated,
+    )
+    if violations:
+        raise ValueError("; ".join(violations))
+    return validated
+
+
+@policy_app.command("template")
+def policy_template(
+    assurance_level: str = typer.Option(..., "--assurance-level", help="level-1|level-2|level-3"),
+    advisory_trusted_subject: Optional[str] = typer.Option(
+        None, help="Trusted advisory signer subject"
+    ),
+    advisory_trusted_subjects: Optional[str] = typer.Option(
+        None, help="Comma-separated trusted advisory signer subjects"
+    ),
+    max_bundle_age_days: Optional[int] = typer.Option(None, help="Required for level-3 templates"),
+    output: Optional[str] = typer.Option(None, help="Optional output path for policy template"),
+    json_output: bool = typer.Option(False, "--json", help="Deterministic JSON output"),
+):
+    """Generate a baseline policy template for an assurance level."""
+    try:
+        advisory_subjects: List[str] = []
+        if advisory_trusted_subject:
+            advisory_subjects.append(advisory_trusted_subject)
+        advisory_subjects.extend(_parse_csv_values(advisory_trusted_subjects))
+        policy = _policy_template_for_assurance_level(
+            assurance_level=assurance_level,
+            advisory_subject_overrides=advisory_subjects,
+            max_bundle_age_days=max_bundle_age_days,
+        )
+        out_path = Path(output) if output else None
+        if out_path is not None:
+            write_json(out_path, policy)
+        _emit(
+            {
+                "ok": True,
+                "assurance_level": assurance_level,
+                "policy": policy,
+                "path": str(out_path) if out_path else None,
+            },
+            json_output,
+        )
+    except Exception as e:
+        _emit({"ok": False, "error": str(e), "command": "policy template"}, json_output)
+        raise typer.Exit(code=1)
+
+
+@policy_app.command("migrate")
+def policy_migrate(
+    input: str = typer.Option(..., "--input", "-i", help="Path to policy JSON or policy record"),
+    to_assurance_level: str = typer.Option(
+        ..., "--to-assurance-level", help="level-1|level-2|level-3"
+    ),
+    advisory_trusted_subject: Optional[str] = typer.Option(
+        None, help="Trusted advisory signer subject override"
+    ),
+    advisory_trusted_subjects: Optional[str] = typer.Option(
+        None, help="Comma-separated trusted advisory signer subject overrides"
+    ),
+    max_bundle_age_days: Optional[int] = typer.Option(
+        None, help="Required when migrating to level-3 without existing freshness policy"
+    ),
+    output: Optional[str] = typer.Option(None, help="Output path for migrated policy JSON"),
+    json_output: bool = typer.Option(False, "--json", help="Deterministic JSON output"),
+):
+    """Migrate an existing policy payload to a target assurance level."""
+    try:
+        input_path = ensure_artifact(input)
+        base_policy = policy_from_file(str(input_path))
+        advisory_subjects: List[str] = []
+        if advisory_trusted_subject:
+            advisory_subjects.append(advisory_trusted_subject)
+        advisory_subjects.extend(_parse_csv_values(advisory_trusted_subjects))
+        migrated = _migrate_policy_to_assurance_level(
+            policy=base_policy,
+            assurance_level=to_assurance_level,
+            advisory_subject_overrides=advisory_subjects,
+            max_bundle_age_days=max_bundle_age_days,
+        )
+        out_path = (
+            Path(output)
+            if output
+            else input_path.with_name(f"{input_path.stem}.{to_assurance_level}.policy.json")
+        )
+        write_json(out_path, migrated)
+        _emit(
+            {
+                "ok": True,
+                "input": str(input_path),
+                "assurance_level": to_assurance_level,
+                "path": str(out_path),
+                "policy": migrated,
+            },
+            json_output,
+        )
+    except Exception as e:
+        _emit({"ok": False, "error": str(e), "command": "policy migrate"}, json_output)
         raise typer.Exit(code=1)
 
 

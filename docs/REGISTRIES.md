@@ -43,3 +43,18 @@ Allowed status values:
 - `active`
 - `mitigated`
 - `withdrawn`
+
+## 5. Advisory Feed Schema
+
+Feed schema:
+- `aixv.advisory-feed/v1`
+
+Required fields:
+- `entries[]` where each entry includes:
+  - `record` (or `record_url`): advisory signed-record JSON reference
+  - `bundle` (or `bundle_url`): Sigstore bundle JSON reference
+
+Operational semantics:
+- Each entry must verify against trusted signer subjects before import.
+- Replay/stale updates are rejected when integrated time does not advance.
+- Optional freshness guard rejects bundles older than configured max age.

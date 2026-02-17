@@ -237,6 +237,7 @@ Export targets:
 - Clock skew tolerance MUST be explicit in verifier config.
 - Digest algorithm agility MUST be designed in (`sha256` required in v1).
 - Replay protection SHOULD check transparency log integrated time and bundle uniqueness.
+- Remote advisory ingestion SHOULD enforce monotonic integrated time per advisory ID and reject stale bundles by configured age.
 - All critical security decisions MUST be auditable with machine-readable reason codes.
 
 ## 15. Reference CLI Contract (v1)
@@ -245,7 +246,8 @@ Export targets:
 - `aixv attest <artifact> --predicate <type> --input <json>`
 - `aixv verify <artifact> [--policy <file>]`
 - `aixv provenance <artifact> [--depth N]`
-- `aixv advisory create|verify|list ...`
+- `aixv advisory create|verify|list|sync ...`
+- `aixv policy template|migrate|create|verify ...`
 - `aixv rollback <artifact> --to <digest>`
 - `aixv export <artifact> --format in-toto|slsa|ml-bom|aixv`
 

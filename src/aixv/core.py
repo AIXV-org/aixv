@@ -883,31 +883,38 @@ def list_advisories(
                 continue
             if normalized_candidate == target:
                 signed_and_trusted = False
+                bundle_ref: Optional[Path] = None
                 if bundle_path and isinstance(bundle_path, str):
-                    bundle_ref = Path(bundle_path)
-                    if not bundle_ref.is_absolute():
-                        bundle_ref = path.parent / bundle_ref
-                    if bundle_ref.exists():
-                        try:
-                            verify_artifact_with_sigstore(
-                                artifact=path,
-                                bundle_in=bundle_ref,
-                                subject=None,
-                                issuer=None,
-                                allow_subjects=trusted_subjects or [],
-                                allow_issuers=trusted_issuers or [],
-                                staging=staging,
-                                offline=offline,
-                            )
-                            signed_and_trusted = True
-                        except Exception:
-                            signed_and_trusted = False
+                    candidate_ref = Path(bundle_path)
+                    if not candidate_ref.is_absolute():
+                        candidate_ref = path.parent / candidate_ref
+                    if candidate_ref.exists():
+                        bundle_ref = candidate_ref
+                if bundle_ref is None:
+                    default_bundle = path.with_name(f"{path.name}.sigstore.json")
+                    if default_bundle.exists():
+                        bundle_ref = default_bundle
+                if bundle_ref is not None and bundle_ref.exists():
+                    try:
+                        verify_artifact_with_sigstore(
+                            artifact=path,
+                            bundle_in=bundle_ref,
+                            subject=None,
+                            issuer=None,
+                            allow_subjects=trusted_subjects or [],
+                            allow_issuers=trusted_issuers or [],
+                            staging=staging,
+                            offline=offline,
+                        )
+                        signed_and_trusted = True
+                    except Exception:
+                        signed_and_trusted = False
                 if require_signed and not signed_and_trusted:
                     break
                 advisory = dict(advisory)
                 advisory["_trust"] = {
                     "signed_and_trusted": signed_and_trusted,
-                    "signature_bundle_path": bundle_path,
+                    "signature_bundle_path": str(bundle_ref) if bundle_ref else bundle_path,
                 }
                 out.append(advisory)
                 break
@@ -948,7 +955,8 @@ def resolve_signature_bundle_path(record_path: Path, explicit_bundle: Optional[s
                 bundle_ref = Path(record.signature_bundle_path)
                 if not bundle_ref.is_absolute():
                     bundle_ref = record_path.parent / bundle_ref
-                return bundle_ref
+                if bundle_ref.exists():
+                    return bundle_ref
     except Exception:
         pass
     return record_path.with_name(f"{record_path.name}.sigstore.json")
@@ -1326,6 +1334,51 @@ def evaluate_freshness_policy(
     age = datetime.now(tz=timezone.utc) - signed_at
     if age.total_seconds() > int(max_age_days) * 86400:
         violations.append(f"bundle age exceeds max_bundle_age_days ({max_age_days})")
+    return violations
+
+
+def evaluate_advisory_sync_guards(
+    *,
+    integrated_time: Optional[str],
+    previous_integrated_time: Optional[str],
+    max_age_days: Optional[int],
+    now: Optional[datetime] = None,
+) -> List[str]:
+    violations: List[str] = []
+    if integrated_time is None:
+        return ["advisory sync requires bundle integrated time"]
+    try:
+        observed = datetime.fromisoformat(integrated_time)
+    except Exception:
+        return ["advisory sync integrated_time is invalid"]
+    if observed.tzinfo is None:
+        observed = observed.replace(tzinfo=timezone.utc)
+    observed = observed.astimezone(timezone.utc)
+
+    if previous_integrated_time is not None:
+        try:
+            previous = datetime.fromisoformat(previous_integrated_time)
+            if previous.tzinfo is None:
+                previous = previous.replace(tzinfo=timezone.utc)
+            previous = previous.astimezone(timezone.utc)
+            if observed <= previous:
+                violations.append(
+                    "advisory replay/stale update detected: integrated_time did not advance"
+                )
+        except Exception:
+            violations.append("advisory sync state integrated_time is invalid")
+
+    if max_age_days is not None:
+        if max_age_days < 1:
+            violations.append("max_age_days must be >= 1")
+        else:
+            now_ts = now or datetime.now(tz=timezone.utc)
+            if now_ts.tzinfo is None:
+                now_ts = now_ts.replace(tzinfo=timezone.utc)
+            age = now_ts.astimezone(timezone.utc) - observed
+            if age.total_seconds() > int(max_age_days) * 86400:
+                violations.append(f"advisory bundle age exceeds max_age_days ({max_age_days})")
+
     return violations
 
 

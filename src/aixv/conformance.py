@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from aixv.core import (
     advisory_trust_constraints_from_policy,
     evaluate_advisory_policy,
+    evaluate_advisory_sync_guards,
     load_signed_record,
     validate_bundle_payload,
     validate_policy_payload,
@@ -329,6 +330,40 @@ def _check_bundle_schema_validation() -> ConformanceCheck:
     )
 
 
+def _check_advisory_sync_replay_and_freshness() -> ConformanceCheck:
+    replay_violations = evaluate_advisory_sync_guards(
+        integrated_time="2026-02-16T00:00:00+00:00",
+        previous_integrated_time="2026-02-16T00:00:00+00:00",
+        max_age_days=None,
+    )
+    stale_violations = evaluate_advisory_sync_guards(
+        integrated_time="2026-01-01T00:00:00+00:00",
+        previous_integrated_time=None,
+        max_age_days=7,
+        now=datetime(2026, 2, 1, tzinfo=timezone.utc),
+    )
+    replay_blocked = any("replay/stale" in v for v in replay_violations)
+    stale_blocked = any("max_age_days" in v for v in stale_violations)
+    if replay_blocked and stale_blocked:
+        return ConformanceCheck(
+            check_id="advisory.sync.replay-freshness.v1",
+            status="pass",
+            evidence={
+                "replay_violations": replay_violations,
+                "stale_violations": stale_violations,
+            },
+        )
+    return ConformanceCheck(
+        check_id="advisory.sync.replay-freshness.v1",
+        status="fail",
+        evidence={
+            "replay_violations": replay_violations,
+            "stale_violations": stale_violations,
+        },
+        error="advisory sync replay/freshness guards failed",
+    )
+
+
 def run_conformance_checks() -> ConformanceReport:
     checks = [
         _check_fixtures_exist(),
@@ -339,6 +374,7 @@ def run_conformance_checks() -> ConformanceReport:
         _check_advisory_trust_subject_fallback(),
         _check_signed_advisory_policy_semantics(),
         _check_bundle_schema_validation(),
+        _check_advisory_sync_replay_and_freshness(),
         _check_invalid_artifact_bundle_rejected(),
         _check_invalid_statement_bundle_rejected(),
     ]
