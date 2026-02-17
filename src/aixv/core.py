@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -16,6 +17,7 @@ from cryptography.x509 import (
 from cryptography.x509.oid import NameOID
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sigstore.dsse import Statement
+from sigstore.hashes import HashAlgorithm, Hashed
 from sigstore.models import Bundle, ClientTrustConfig
 from sigstore.oidc import IdentityToken, Issuer
 from sigstore.sign import SigningContext
@@ -31,6 +33,7 @@ PREDICATE_ALIASES: Dict[str, str] = {
 ALLOWED_SEVERITIES = {"low", "medium", "high", "critical"}
 ALLOWED_ADVISORY_STATUS = {"active", "mitigated", "withdrawn"}
 SEVERITY_RANK = {"low": 1, "medium": 2, "high": 3, "critical": 4}
+ATTESTATION_RECORD_SCHEMA = "aixv.attestation-record/v1"
 
 
 class ParentModel(BaseModel):
@@ -181,6 +184,19 @@ def normalize_sha256_digest(value: str) -> str:
     return f"sha256:{token}"
 
 
+def _normalize_string_list(raw: Any) -> List[str]:
+    if not isinstance(raw, list):
+        return []
+    out: List[str] = []
+    for item in raw:
+        if not isinstance(item, str):
+            continue
+        value = item.strip()
+        if value and value not in out:
+            out.append(value)
+    return out
+
+
 def ensure_artifact(path: str) -> Path:
     artifact = Path(path)
     if not artifact.exists():
@@ -202,7 +218,7 @@ def write_json(path: Path, payload: Dict[str, Any]) -> None:
         f.write("\n")
 
 
-def sha256_file(path: Path) -> str:
+def _sha256_file_digest(path: Path) -> bytes:
     h = hashlib.sha256()
     with path.open("rb") as f:
         while True:
@@ -210,7 +226,15 @@ def sha256_file(path: Path) -> str:
             if not chunk:
                 break
             h.update(chunk)
-    return f"sha256:{h.hexdigest()}"
+    return h.digest()
+
+
+def sha256_file(path: Path) -> str:
+    return f"sha256:{_sha256_file_digest(path).hex()}"
+
+
+def sigstore_hashed_input(path: Path) -> Hashed:
+    return Hashed(algorithm=HashAlgorithm.SHA2_256, digest=_sha256_file_digest(path))
 
 
 def bundle_path_for(artifact: Path) -> Path:
@@ -253,6 +277,27 @@ def validate_policy_payload(raw: Dict[str, Any]) -> Dict[str, Any]:
     except ValidationError as e:
         raise ValueError(str(e))
     return parsed.model_dump()
+
+
+def advisory_trust_constraints_from_policy(policy: Dict[str, Any]) -> Dict[str, List[str]]:
+    subjects = _normalize_string_list(policy.get("advisory_allow_subjects"))
+    issuers = _normalize_string_list(policy.get("advisory_allow_issuers"))
+
+    if not subjects:
+        subjects = _normalize_string_list(policy.get("allow_subjects"))
+    if not subjects:
+        subject = policy.get("subject")
+        if isinstance(subject, str) and subject.strip():
+            subjects = [subject.strip()]
+
+    if not issuers:
+        issuers = _normalize_string_list(policy.get("allow_issuers"))
+    if not issuers:
+        issuer = policy.get("issuer")
+        if isinstance(issuer, str) and issuer.strip():
+            issuers = [issuer.strip()]
+
+    return {"subjects": subjects, "issuers": issuers}
 
 
 def resolve_predicate_uri(predicate: str) -> str:
@@ -332,12 +377,13 @@ def sign_artifact_with_sigstore(
         else ClientTrustConfig.production(offline=offline)
     )
     ctx = SigningContext.from_trust_config(trust_config)
+    hashed_input = sigstore_hashed_input(artifact)
     with ctx.signer(token, cache=True) as signer:
-        bundle = signer.sign_artifact(artifact.read_bytes())
+        bundle = signer.sign_artifact(hashed_input)
     bundle_out.write_text(bundle.to_json(), encoding="utf-8")
     return {
         "bundle_path": str(bundle_out),
-        "digest": sha256_file(artifact),
+        "digest": f"sha256:{hashed_input.digest.hex()}",
         "identity": {"subject": token.identity, "issuer": token.issuer},
         "staging": staging,
     }
@@ -378,6 +424,19 @@ def sign_statement_with_sigstore(
     }
 
 
+def _bundle_integrated_time(bundle: Bundle) -> Optional[str]:
+    if bundle.log_entry and bundle.log_entry._inner.integrated_time:
+        return (
+            datetime.fromtimestamp(
+                bundle.log_entry._inner.integrated_time,
+                tz=timezone.utc,
+            )
+            .replace(microsecond=0)
+            .isoformat()
+        )
+    return None
+
+
 def verify_artifact_with_sigstore(
     *,
     artifact: Path,
@@ -399,24 +458,66 @@ def verify_artifact_with_sigstore(
         allow_subjects=allow_subjects or [],
         allow_issuers=allow_issuers or [],
     )
-    verifier.verify_artifact(artifact.read_bytes(), bundle, identity_policy)
+    hashed_input = sigstore_hashed_input(artifact)
+    verifier.verify_artifact(hashed_input, bundle, identity_policy)
     cert = bundle.signing_certificate
     subject_candidates = _extract_subject_candidates(cert)
     issuer_value = _extract_oidc_issuer(cert)
-    integrated_time = None
-    if bundle.log_entry and bundle.log_entry._inner.integrated_time:
-        integrated_time = (
-            datetime.fromtimestamp(
-                bundle.log_entry._inner.integrated_time,
-                tz=timezone.utc,
-            )
-            .replace(microsecond=0)
-            .isoformat()
-        )
+    integrated_time = _bundle_integrated_time(bundle)
     return {
         "verified": True,
-        "digest": sha256_file(artifact),
+        "digest": f"sha256:{hashed_input.digest.hex()}",
         "bundle_path": str(bundle_in),
+        "expected_subject": subject,
+        "expected_issuer": issuer,
+        "actual_subjects": subject_candidates,
+        "actual_issuer": issuer_value,
+        "integrated_time": integrated_time,
+        "staging": staging,
+    }
+
+
+def verify_statement_with_sigstore(
+    *,
+    statement: Dict[str, Any],
+    bundle_in: Path,
+    subject: Optional[str],
+    issuer: Optional[str],
+    allow_subjects: Optional[List[str]] = None,
+    allow_issuers: Optional[List[str]] = None,
+    staging: bool,
+    offline: bool,
+) -> Dict[str, Any]:
+    bundle = Bundle.from_json(bundle_in.read_text(encoding="utf-8"))
+    verifier = (
+        Verifier.staging(offline=offline) if staging else Verifier.production(offline=offline)
+    )
+    identity_policy = build_sigstore_identity_policy(
+        subject=subject,
+        issuer=issuer,
+        allow_subjects=allow_subjects or [],
+        allow_issuers=allow_issuers or [],
+    )
+    payload_type, payload_bytes = verifier.verify_dsse(bundle, identity_policy)
+    try:
+        verified_statement = json.loads(payload_bytes.decode("utf-8"))
+    except Exception as exc:
+        raise ValueError(f"verified DSSE payload is not valid UTF-8 JSON: {exc}") from exc
+    if not isinstance(verified_statement, dict):
+        raise ValueError("verified DSSE payload is not a JSON object statement")
+    if verified_statement.get("_type") != "https://in-toto.io/Statement/v1":
+        raise ValueError("verified DSSE payload is not an in-toto Statement/v1")
+    if verified_statement != statement:
+        raise ValueError("verified DSSE payload does not match expected statement content")
+
+    cert = bundle.signing_certificate
+    subject_candidates = _extract_subject_candidates(cert)
+    issuer_value = _extract_oidc_issuer(cert)
+    integrated_time = _bundle_integrated_time(bundle)
+    return {
+        "verified": True,
+        "bundle_path": str(bundle_in),
+        "payload_type": payload_type,
         "expected_subject": subject,
         "expected_issuer": issuer,
         "actual_subjects": subject_candidates,
@@ -459,26 +560,97 @@ def create_attestation_record(
     artifact: Path,
     predicate_uri: str,
     statement: Dict[str, Any],
+    signature_bundle_path: Optional[str] = None,
 ) -> Path:
     digest = sha256_file(artifact).replace(":", "_")
     parts = predicate_uri.rstrip("/").split("/")
     key = f"{parts[-2]}.{parts[-1]}" if len(parts) >= 2 else parts[-1]
     path = attestation_store(root) / f"{digest}.{key}.json"
-    write_json(path, statement)
+    write_json(
+        path,
+        {
+            "schema": ATTESTATION_RECORD_SCHEMA,
+            "created_at": now_iso(),
+            "predicate_type": predicate_uri,
+            "statement": statement,
+            "signature_bundle_path": signature_bundle_path,
+        },
+    )
     return path
 
 
-def load_attestations_for_digest(root: Path, digest: str) -> List[Dict[str, Any]]:
+def _statement_has_subject_digest(statement: Dict[str, Any], digest: str) -> bool:
+    target = normalize_sha256_digest(digest)
+    subjects = statement.get("subject", [])
+    if not isinstance(subjects, list):
+        return False
+    for subject in subjects:
+        if not isinstance(subject, dict):
+            continue
+        subject_digest = subject.get("digest")
+        if not isinstance(subject_digest, dict):
+            continue
+        token = subject_digest.get("sha256")
+        if not isinstance(token, str):
+            continue
+        try:
+            if normalize_sha256_digest(token) == target:
+                return True
+        except ValueError:
+            continue
+    return False
+
+
+def load_attestation_records_for_digest(root: Path, digest: str) -> List[Dict[str, Any]]:
     needle = digest.replace(":", "_")
+    target = normalize_sha256_digest(digest)
     results: List[Dict[str, Any]] = []
     store = attestation_store(root)
     if not store.exists():
         return results
     for path in sorted(store.glob(f"{needle}.*.json")):
         try:
-            results.append(read_json(str(path)))
+            raw = read_json(str(path))
         except Exception:
             continue
+        statement: Optional[Dict[str, Any]] = None
+        signature_bundle_path: Optional[str] = None
+        if isinstance(raw, dict) and raw.get("schema") == ATTESTATION_RECORD_SCHEMA:
+            statement_candidate = raw.get("statement")
+            if isinstance(statement_candidate, dict):
+                statement = statement_candidate
+            bundle_candidate = raw.get("signature_bundle_path")
+            if isinstance(bundle_candidate, str) and bundle_candidate.strip():
+                signature_bundle_path = bundle_candidate
+        elif isinstance(raw, dict):
+            statement = raw
+            bundle_candidate = raw.get("signature_bundle_path")
+            if isinstance(bundle_candidate, str) and bundle_candidate.strip():
+                signature_bundle_path = bundle_candidate
+        if not isinstance(statement, dict):
+            continue
+        if not _statement_has_subject_digest(statement, target):
+            continue
+        if not signature_bundle_path:
+            default_bundle = path.with_name(f"{path.name}.sigstore.json")
+            if default_bundle.exists():
+                signature_bundle_path = str(default_bundle)
+        results.append(
+            {
+                "path": str(path),
+                "statement": statement,
+                "signature_bundle_path": signature_bundle_path,
+            }
+        )
+    return results
+
+
+def load_attestations_for_digest(root: Path, digest: str) -> List[Dict[str, Any]]:
+    results: List[Dict[str, Any]] = []
+    for entry in load_attestation_records_for_digest(root, digest):
+        statement = entry.get("statement")
+        if isinstance(statement, dict):
+            results.append(statement)
     return results
 
 
@@ -750,6 +922,42 @@ def detect_parents_from_training_attestations(
     return parents
 
 
+def trace_training_lineage_parents(
+    root: Path, artifact_digest: str, depth: int
+) -> List[Dict[str, Any]]:
+    if depth < 1:
+        return []
+    start = normalize_sha256_digest(artifact_digest)
+    visited = {start}
+    frontier = deque([(start, 1)])
+    out: List[Dict[str, Any]] = []
+
+    while frontier:
+        child_digest, current_depth = frontier.popleft()
+        attestations = load_attestations_for_digest(root, child_digest)
+        parents = detect_parents_from_training_attestations(attestations)
+        for parent in parents:
+            if not isinstance(parent, dict):
+                continue
+            candidate = parent.get("digest")
+            if not isinstance(candidate, str):
+                continue
+            try:
+                normalized_parent = normalize_sha256_digest(candidate)
+            except ValueError:
+                continue
+            entry = dict(parent)
+            entry["digest"] = normalized_parent
+            entry["child_digest"] = child_digest
+            entry["depth"] = current_depth
+            out.append(entry)
+            if current_depth < depth and normalized_parent not in visited:
+                visited.add(normalized_parent)
+                frontier.append((normalized_parent, current_depth + 1))
+
+    return out
+
+
 def _extract_subject_candidates(cert: Any) -> List[str]:
     out: List[str] = []
     try:
@@ -867,7 +1075,17 @@ def evaluate_advisory_policy(
     advisories: List[Dict[str, Any]],
 ) -> List[str]:
     violations: List[str] = []
-    active = [a for a in advisories if a.get("status") == "active"]
+    require_signed = bool(policy.get("require_signed_advisories", False))
+    considered = advisories
+    if require_signed:
+        considered = [
+            a
+            for a in advisories
+            if isinstance(a.get("_trust"), dict)
+            and a.get("_trust", {}).get("signed_and_trusted") is True
+        ]
+
+    active = [a for a in considered if a.get("status") == "active"]
     if policy.get("require_no_active_advisories") and active:
         violations.append("active advisories present while require_no_active_advisories=true")
 

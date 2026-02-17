@@ -106,6 +106,12 @@ aixv verify model.safetensors \
 
 # 4) Run conformance checks
 aixv conformance --json
+
+# 5) Optional: enforce signed-and-trusted attestations in lineage/export flows
+aixv provenance model.safetensors \
+  --require-signed-attestations \
+  --trusted-attestation-subject ci-attestations@aixv.org \
+  --json
 ```
 
 ## CLI Surface
@@ -123,7 +129,7 @@ aixv policy verify .aixv/policies/policy.json --trusted-subject security-policy@
 aixv record create --kind waiver --record-id WVR-2026-01 --input waiver.json --sign
 aixv record verify .aixv/policies/policy.json --kind policy --trusted-subject security-policy@aixv.org
 aixv conformance --json
-aixv rollback model-v2.safetensors --to sha256:...
+aixv rollback model-v2.safetensors --to sha256:... --identity-token-env SIGSTORE_ID_TOKEN
 aixv export model.safetensors --format in-toto
 ```
 

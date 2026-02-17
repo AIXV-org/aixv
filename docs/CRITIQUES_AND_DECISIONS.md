@@ -72,7 +72,7 @@ Decision:
 - Evidence remains queryable via stored attestations/advisories/signatures.
 
 Status:
-- Implemented as explicit rollback event record; lineage expansion ongoing.
+- Implemented as explicit rollback event record and signed by default (`rollback --sign` default true); lineage expansion ongoing.
 
 ## 7. "Over-flexible tooling leads to insecure defaults"
 
@@ -87,6 +87,20 @@ Decision:
 
 Status:
 - Implemented; further hardening planned with signed remote feeds.
+
+## 8. "Signed attestations are emitted but not enforced downstream"
+
+Risk:
+- Provenance/export views could include unsigned or untrusted attestation claims without explicit operator intent.
+
+Decision:
+- Added strict mode for lineage/export flows:
+  - `--require-signed-attestations`
+  - trusted signer subject/issuer constraints for attestation verification.
+- Signed attestation verification uses Sigstore DSSE verification and requires payload match with stored statements.
+
+Status:
+- Implemented in `provenance` and `export` CLI flows.
 
 ## Next hardening steps
 

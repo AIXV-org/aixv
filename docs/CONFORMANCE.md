@@ -45,3 +45,6 @@ Runtime conformance report:
 - `policy.fixture.valid.v1`: valid policy fixture is accepted.
 - `policy.fixture.invalid.v1`: invalid policy fixture is rejected.
 - `record.fixture.policy.v1`: signed-record policy fixture parses with expected kind.
+- `policy.unknown-field.reject.v1`: unknown policy fields are rejected.
+- `policy.advisory-trust.subject-fallback.v1`: advisory trust roots fall back to policy `subject`.
+- `advisory.signed-policy.filtering.v1`: when signed advisories are required, untrusted advisories are ignored and trusted advisories drive enforcement.
