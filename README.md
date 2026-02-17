@@ -1,8 +1,7 @@
 <p align="left">
   <img
-    src="https://www.aixv.org/AIXV-3.png"
-    alt="AIXV logo"
-    width="350"
+    src="https://www.aixv.org/AIXV-repo-banner.png"
+    alt="AIXV repository banner"
   />
 </p>
 
