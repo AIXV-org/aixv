@@ -102,17 +102,18 @@ Decision:
 Status:
 - Implemented in `provenance` and `export` CLI flows.
 
-## 9. "Profiles are documented but not enforced"
+## 9. "Assurance levels are documented but not enforced"
 
 Risk:
-- Organizations cannot reliably prove they are operating in a specific assurance profile.
+- Organizations cannot reliably prove they are operating in a specific assurance level.
 
 Decision:
-- Added verifier profile gates:
-  - `verify --profile core-minimal`
-  - `verify --profile core-enterprise`
-  - `verify --profile core-regulated`
-- Profile gates enforce required policy controls and signed-control-plane constraints.
+- Added verifier assurance-level gates:
+  - `verify --assurance-level level-1`
+  - `verify --assurance-level level-2`
+  - `verify --assurance-level level-3`
+- Levels are ordinal control tiers, not labels for specific sectors or regulatory regimes.
+- Assurance-level gates enforce required policy controls and signed-control-plane constraints.
 
 Status:
 - Implemented.
@@ -149,4 +150,4 @@ Status:
 
 1. Add signed remote advisory feed ingestion with replay/freshness protection.
 2. Add conformance test vectors for every failure mode above.
-3. Add compatibility profile gates (`core-minimal`, `core-enterprise`, `core-regulated`).
+3. Add policy templates and migration tooling for organizations adopting `level-1` -> `level-3`.

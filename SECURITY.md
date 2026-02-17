@@ -56,4 +56,4 @@ The following are non-negotiable invariants:
 
 This repository is pre-alpha. Use in production only with explicit risk acceptance.
 
-For production pilots, minimum controls are defined in `docs/QUALITY_BAR.md`.
+For production pilots, minimum controls are defined in `docs/QUALITY.md`.

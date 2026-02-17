@@ -34,7 +34,7 @@ ALLOWED_SEVERITIES = {"low", "medium", "high", "critical"}
 ALLOWED_ADVISORY_STATUS = {"active", "mitigated", "withdrawn"}
 SEVERITY_RANK = {"low": 1, "medium": 2, "high": 3, "critical": 4}
 ATTESTATION_RECORD_SCHEMA = "aixv.attestation-record/v1"
-ALLOWED_PROFILES = {"core-minimal", "core-enterprise", "core-regulated"}
+ALLOWED_ASSURANCE_LEVELS = {"level-1", "level-2", "level-3"}
 
 
 class ParentModel(BaseModel):
@@ -329,38 +329,42 @@ def advisory_trust_constraints_from_policy(policy: Dict[str, Any]) -> Dict[str, 
     return {"subjects": subjects, "issuers": issuers}
 
 
-def evaluate_profile_requirements(
+def evaluate_assurance_level_requirements(
     *,
-    profile: Optional[str],
+    assurance_level: Optional[str],
     policy_provided: bool,
     require_signed_policy: bool,
     policy: Dict[str, Any],
 ) -> List[str]:
-    if profile is None:
+    if assurance_level is None:
         return []
-    if profile not in ALLOWED_PROFILES:
-        return [f"unsupported profile: {profile}"]
+    if assurance_level not in ALLOWED_ASSURANCE_LEVELS:
+        return [f"unsupported assurance level: {assurance_level}"]
 
     violations: List[str] = []
-    if profile in {"core-enterprise", "core-regulated"}:
+    if assurance_level in {"level-2", "level-3"}:
         if not policy_provided:
-            violations.append(f"profile {profile} requires --policy")
+            violations.append(f"assurance level {assurance_level} requires --policy")
         if not require_signed_policy:
-            violations.append(f"profile {profile} requires signed policy verification")
+            violations.append(
+                f"assurance level {assurance_level} requires signed policy verification"
+            )
         if not bool(policy.get("require_signed_advisories", False)):
-            violations.append(f"profile {profile} requires require_signed_advisories=true")
+            violations.append(
+                f"assurance level {assurance_level} requires require_signed_advisories=true"
+            )
         advisory_trust = advisory_trust_constraints_from_policy(policy)
         if len(advisory_trust["subjects"]) < 1:
             violations.append(
-                f"profile {profile} requires advisory trust subjects via "
+                f"assurance level {assurance_level} requires advisory trust subjects via "
                 "advisory_allow_subjects or subject/allow_subjects"
             )
 
-    if profile == "core-regulated":
+    if assurance_level == "level-3":
         if policy.get("max_bundle_age_days") is None:
-            violations.append("profile core-regulated requires max_bundle_age_days")
+            violations.append("assurance level level-3 requires max_bundle_age_days")
         if not bool(policy.get("require_no_active_advisories", False)):
-            violations.append("profile core-regulated requires require_no_active_advisories=true")
+            violations.append("assurance level level-3 requires require_no_active_advisories=true")
 
     return violations
 

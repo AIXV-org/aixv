@@ -9,7 +9,7 @@ from aixv.core import (
     create_signed_record_payload,
     evaluate_admission,
     evaluate_advisory_policy,
-    evaluate_profile_requirements,
+    evaluate_assurance_level_requirements,
     export_attestations_as_ml_bom,
     export_attestations_as_slsa,
     load_attestation_records_for_digest,
@@ -219,9 +219,9 @@ def test_trace_training_lineage_parents_honors_depth(tmp_path: Path) -> None:
     assert {entry["digest"] for entry in descendants} == {parent_digest, leaf_digest}
 
 
-def test_profile_requirements_for_regulated_policy() -> None:
-    violations = evaluate_profile_requirements(
-        profile="core-regulated",
+def test_assurance_level_requirements_for_level_3_policy() -> None:
+    violations = evaluate_assurance_level_requirements(
+        assurance_level="level-3",
         policy_provided=True,
         require_signed_policy=True,
         policy={

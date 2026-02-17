@@ -1,6 +1,6 @@
-# AIXV Quality Bar (Core)
+# AIXV Quality (Core)
 
-This is the minimal bar for production-grade provenance verification in AIXV.
+This document defines core quality requirements for production-grade provenance verification in AIXV.
 
 ## 1. Cryptographic Integrity
 
@@ -39,4 +39,4 @@ This is the minimal bar for production-grade provenance verification in AIXV.
 
 - Commands support deterministic JSON output (`--json`) for CI/CD and admission hooks.
 - Decision outcomes are reproducible from signed evidence + policy.
-- Verifier profile gates (`core-minimal|core-enterprise|core-regulated`) provide explicit assurance mode enforcement.
+- Verifier assurance-level gates (`level-1|level-2|level-3`) provide explicit assurance mode enforcement.

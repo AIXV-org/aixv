@@ -14,7 +14,7 @@ from aixv.core import (
     create_record,
     ensure_artifact,
     evaluate_admission,
-    evaluate_profile_requirements,
+    evaluate_assurance_level_requirements,
     export_attestations_as_ml_bom,
     export_attestations_as_slsa,
     list_advisories,
@@ -266,9 +266,10 @@ def verify(
     policy_trusted_issuers: Optional[str] = typer.Option(
         None, help="Comma-separated trusted signer issuers for policy file"
     ),
-    profile: Optional[str] = typer.Option(
+    assurance_level: Optional[str] = typer.Option(
         None,
-        help="Assurance profile gate: core-minimal|core-enterprise|core-regulated",
+        "--assurance-level",
+        help="Assurance level gate: level-1|level-2|level-3",
     ),
     staging: bool = typer.Option(False, help="Use Sigstore staging instance"),
     offline: bool = typer.Option(False, help="Use cached trust root only"),
@@ -318,14 +319,14 @@ def verify(
         if issuer is not None:
             effective_policy["issuer"] = issuer
 
-        profile_violations = evaluate_profile_requirements(
-            profile=profile,
+        assurance_level_violations = evaluate_assurance_level_requirements(
+            assurance_level=assurance_level,
             policy_provided=policy is not None,
             require_signed_policy=require_signed_policy,
             policy=effective_policy,
         )
-        if profile_violations:
-            raise ValueError("; ".join(profile_violations))
+        if assurance_level_violations:
+            raise ValueError("; ".join(assurance_level_violations))
 
         identity_constraints_present = bool(subject or effective_policy.get("allow_subjects"))
         if not identity_constraints_present:
@@ -375,8 +376,8 @@ def verify(
         result["policy_violations"] = decision.violations
         result["admission_decision"] = decision.decision
         result["admission_evidence"] = decision.evidence
-        if profile:
-            result["profile"] = profile
+        if assurance_level:
+            result["assurance_level"] = assurance_level
 
         if decision.decision != "allow":
             result["ok"] = False

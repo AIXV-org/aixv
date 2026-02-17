@@ -208,7 +208,7 @@ def test_rollback_no_sign_emits_plain_record() -> None:
         assert payload["event_type"] == "rollback"
 
 
-def test_verify_profile_enterprise_requires_policy() -> None:
+def test_verify_level_2_requires_policy() -> None:
     with runner.isolated_filesystem():
         Path("model.safetensors").write_bytes(b"hello")
         Path("model.safetensors.sigstore.json").write_text("{}", encoding="utf-8")
@@ -219,8 +219,8 @@ def test_verify_profile_enterprise_requires_policy() -> None:
                 "model.safetensors",
                 "--identity",
                 "alice@example.com",
-                "--profile",
-                "core-enterprise",
+                "--assurance-level",
+                "level-2",
                 "--json",
             ],
         )

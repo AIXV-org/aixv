@@ -216,17 +216,20 @@ Policy outputs:
 - Breaking changes require new major version URI.
 - Verifiers SHOULD support at least one prior major version during migration.
 
-## 13. Interoperability Profiles
+## 13. Interoperability Assurance Levels
 
-AIXV profiles define strict subsets for predictable exchange:
-- `core-minimal`: sign + verify + training lineage
-- `core-enterprise`: adds advisories, policy decisions, rollback attestations
-- `core-regulated`: adds immutable retention and evidence export requirements
+AIXV assurance levels define strict subsets for predictable exchange:
+- `level-1`: sign + verify + training lineage
+- `level-2`: adds advisories, policy decisions, rollback attestations
+- `level-3`: adds immutable retention and evidence export requirements
+
+These levels are ordinal assurance tiers and do not encode assumptions about any
+specific sector, procurement regime, or legal jurisdiction.
 
 Export targets:
 - in-toto statements
 - SLSA provenance mappings
-- ML-BOM (SPDX/CycloneDX extension profile)
+- ML-BOM (SPDX/CycloneDX extension format)
 
 ## 14. Security Requirements
 

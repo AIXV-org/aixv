@@ -71,13 +71,13 @@ For security and procurement reviews, the strongest immediate signals are:
 
 - `docs/AIXV_STANDARD.md`
 - `docs/NORMATIVE_CORE.md`
-- `docs/QUALITY_BAR.md`
+- `docs/QUALITY.md`
 - `docs/THREAT_MODEL.md`
 - `SECURITY.md`
 - `docs/COMPATIBILITY.md`
 - `docs/TERMINOLOGY.md`
 - `docs/REGISTRIES.md`
-- `docs/PROFILES.md`
+- `docs/ASSURANCE_LEVELS.md`
 - `docs/CONFORMANCE.md`
 - `docs/GOVERNANCE.md`
 - `docs/REPO_CONTROLS.md`
@@ -102,7 +102,7 @@ aixv policy create --input policy.json --sign
 aixv verify model.safetensors \
   --policy .aixv/policies/policy.json \
   --policy-trusted-subject security-policy@aixv.org \
-  --profile core-enterprise \
+  --assurance-level level-2 \
   --json
 
 # 4) Run conformance checks
