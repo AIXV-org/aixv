@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -11,7 +12,10 @@ from aixv.core import (
     advisory_trust_constraints_from_policy,
     evaluate_advisory_policy,
     load_signed_record,
+    validate_bundle_payload,
     validate_policy_payload,
+    verify_artifact_with_sigstore,
+    verify_statement_with_sigstore,
 )
 
 FIXTURES_DIR = Path("docs/conformance/fixtures")
@@ -219,6 +223,112 @@ def _check_signed_advisory_policy_semantics() -> ConformanceCheck:
     )
 
 
+def _check_invalid_artifact_bundle_rejected() -> ConformanceCheck:
+    with TemporaryDirectory() as tmp:
+        artifact = Path(tmp) / "artifact.bin"
+        bundle = Path(tmp) / "artifact.bin.sigstore.json"
+        artifact.write_bytes(b"aixv")
+        bundle.write_text("{}", encoding="utf-8")
+        try:
+            verify_artifact_with_sigstore(
+                artifact=artifact,
+                bundle_in=bundle,
+                subject="alice@example.com",
+                issuer=None,
+                allow_subjects=[],
+                allow_issuers=[],
+                staging=False,
+                offline=True,
+            )
+        except Exception:
+            return ConformanceCheck(
+                check_id="crypto.invalid-bundle.artifact.reject.v1",
+                status="pass",
+                evidence={"expected_rejection": True},
+            )
+    return ConformanceCheck(
+        check_id="crypto.invalid-bundle.artifact.reject.v1",
+        status="fail",
+        evidence={},
+        error="invalid artifact bundle unexpectedly verified",
+    )
+
+
+def _check_invalid_statement_bundle_rejected() -> ConformanceCheck:
+    statement = {
+        "_type": "https://in-toto.io/Statement/v1",
+        "subject": [{"name": "artifact.bin", "digest": {"sha256": "0" * 64}}],
+        "predicateType": "https://aixv.org/attestation/training/v1",
+        "predicate": {
+            "parent_models": [{"digest": f"sha256:{'0' * 64}"}],
+            "datasets": [],
+            "training_run": {
+                "framework": "pytorch",
+                "framework_version": "2.2.0",
+                "code_digest": f"sha256:{'0' * 64}",
+                "environment_digest": f"sha256:{'0' * 64}",
+            },
+            "hyperparameters": {},
+        },
+    }
+    with TemporaryDirectory() as tmp:
+        bundle = Path(tmp) / "statement.sigstore.json"
+        bundle.write_text("{}", encoding="utf-8")
+        try:
+            verify_statement_with_sigstore(
+                statement=statement,
+                bundle_in=bundle,
+                subject="alice@example.com",
+                issuer=None,
+                allow_subjects=[],
+                allow_issuers=[],
+                staging=False,
+                offline=True,
+            )
+        except Exception:
+            return ConformanceCheck(
+                check_id="crypto.invalid-bundle.statement.reject.v1",
+                status="pass",
+                evidence={"expected_rejection": True},
+            )
+    return ConformanceCheck(
+        check_id="crypto.invalid-bundle.statement.reject.v1",
+        status="fail",
+        evidence={},
+        error="invalid statement bundle unexpectedly verified",
+    )
+
+
+def _check_bundle_schema_validation() -> ConformanceCheck:
+    payload = {
+        "bundle_type": "aixv.bundle/v1",
+        "bundle_id": "bundle-main",
+        "primary": "1" * 64,
+        "members": [f"sha256:{'2' * 64}"],
+    }
+    try:
+        validated = validate_bundle_payload(payload)
+    except Exception as exc:
+        return ConformanceCheck(
+            check_id="bundle.schema.validation.v1",
+            status="fail",
+            evidence={"payload": payload},
+            error=str(exc),
+        )
+    if validated["primary"] not in validated["members"]:
+        return ConformanceCheck(
+            check_id="bundle.schema.validation.v1",
+            status="fail",
+            evidence={"validated": validated},
+            error="bundle primary digest missing from members",
+        )
+    return ConformanceCheck(
+        check_id="bundle.schema.validation.v1",
+        status="pass",
+        evidence={"member_count": len(validated["members"])},
+    )
+
+
 def run_conformance_checks() -> ConformanceReport:
     checks = [
         _check_fixtures_exist(),
@@ -228,6 +338,9 @@ def run_conformance_checks() -> ConformanceReport:
         _check_policy_unknown_field_rejected(),
         _check_advisory_trust_subject_fallback(),
         _check_signed_advisory_policy_semantics(),
+        _check_bundle_schema_validation(),
+        _check_invalid_artifact_bundle_rejected(),
+        _check_invalid_statement_bundle_rejected(),
     ]
     overall_status = "pass" if all(c.status == "pass" for c in checks) else "fail"
     return ConformanceReport(

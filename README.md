@@ -102,6 +102,7 @@ aixv policy create --input policy.json --sign
 aixv verify model.safetensors \
   --policy .aixv/policies/policy.json \
   --policy-trusted-subject security-policy@aixv.org \
+  --profile core-enterprise \
   --json
 
 # 4) Run conformance checks
@@ -122,15 +123,20 @@ aixv sign model.safetensors --identity-token-env SIGSTORE_ID_TOKEN
 aixv verify model.safetensors --identity alice@example.com --issuer https://accounts.google.com
 aixv attest model.safetensors --predicate training --input training.json
 aixv provenance model.safetensors --depth 3
+aixv provenance model.safetensors --view explain --depth 3 --json
 aixv advisory create --advisory-id ADV-2026-0001 --severity critical --input advisory.json --sign
 aixv advisory verify .aixv/advisories/ADV-2026-0001.json --trusted-subject security@aixv.org
 aixv policy create --input policy.json --sign
 aixv policy verify .aixv/policies/policy.json --trusted-subject security-policy@aixv.org
 aixv record create --kind waiver --record-id WVR-2026-01 --input waiver.json --sign
 aixv record verify .aixv/policies/policy.json --kind policy --trusted-subject security-policy@aixv.org
+aixv bundle create --input bundle.json --sign
+aixv bundle verify .aixv/records/bundle/bundle-main.json --trusted-subject release@aixv.org
 aixv conformance --json
 aixv rollback model-v2.safetensors --to sha256:... --identity-token-env SIGSTORE_ID_TOKEN
 aixv export model.safetensors --format in-toto
+aixv export model.safetensors --format slsa --json
+aixv export model.safetensors --format ml-bom --json
 ```
 
 ## Policy Example

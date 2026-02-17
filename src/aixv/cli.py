@@ -1,6 +1,6 @@
 import json
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import typer
 from rich.console import Console
@@ -14,6 +14,9 @@ from aixv.core import (
     create_record,
     ensure_artifact,
     evaluate_admission,
+    evaluate_profile_requirements,
+    export_attestations_as_ml_bom,
+    export_attestations_as_slsa,
     list_advisories,
     load_attestation_records_for_digest,
     load_signed_record,
@@ -27,6 +30,7 @@ from aixv.core import (
     sha256_file,
     sign_artifact_with_sigstore,
     sign_statement_with_sigstore,
+    trace_training_lineage_descendants,
     trace_training_lineage_parents,
     validate_policy_payload,
     validate_predicate,
@@ -41,9 +45,11 @@ app = typer.Typer(name="aixv", help="AI Integrity & Verification Protocol CLI")
 advisory_app = typer.Typer(help="Advisory and recall operations")
 policy_app = typer.Typer(help="Policy operations")
 record_app = typer.Typer(help="Generic signed-record operations")
+bundle_app = typer.Typer(help="Multi-artifact bundle operations")
 app.add_typer(advisory_app, name="advisory")
 app.add_typer(policy_app, name="policy")
 app.add_typer(record_app, name="record")
+app.add_typer(bundle_app, name="bundle")
 console = Console()
 
 
@@ -260,6 +266,10 @@ def verify(
     policy_trusted_issuers: Optional[str] = typer.Option(
         None, help="Comma-separated trusted signer issuers for policy file"
     ),
+    profile: Optional[str] = typer.Option(
+        None,
+        help="Assurance profile gate: core-minimal|core-enterprise|core-regulated",
+    ),
     staging: bool = typer.Option(False, help="Use Sigstore staging instance"),
     offline: bool = typer.Option(False, help="Use cached trust root only"),
     json_output: bool = typer.Option(False, "--json", help="Deterministic JSON output"),
@@ -307,6 +317,15 @@ def verify(
             effective_policy["subject"] = identity
         if issuer is not None:
             effective_policy["issuer"] = issuer
+
+        profile_violations = evaluate_profile_requirements(
+            profile=profile,
+            policy_provided=policy is not None,
+            require_signed_policy=require_signed_policy,
+            policy=effective_policy,
+        )
+        if profile_violations:
+            raise ValueError("; ".join(profile_violations))
 
         identity_constraints_present = bool(subject or effective_policy.get("allow_subjects"))
         if not identity_constraints_present:
@@ -356,6 +375,8 @@ def verify(
         result["policy_violations"] = decision.violations
         result["admission_decision"] = decision.decision
         result["admission_evidence"] = decision.evidence
+        if profile:
+            result["profile"] = profile
 
         if decision.decision != "allow":
             result["ok"] = False
@@ -448,6 +469,7 @@ def attest(
 def provenance(
     artifact: str = typer.Argument(..., help="Path to artifact"),
     depth: int = typer.Option(3, help="Lineage traversal depth"),
+    view: str = typer.Option("trace", help="Lineage view: trace|impact|explain"),
     require_signed_attestations: bool = typer.Option(
         False, help="Require all matching attestations to be signed and trusted"
     ),
@@ -465,8 +487,9 @@ def provenance(
     json_output: bool = typer.Option(False, "--json", help="Deterministic JSON output"),
 ):
     """Return local lineage view from stored attestations."""
-    _ = depth
     try:
+        if view not in {"trace", "impact", "explain"}:
+            raise ValueError(f"unsupported provenance view: {view}")
         artifact_path = ensure_artifact(artifact)
         digest = sha256_file(artifact_path)
         entries = load_attestation_records_for_digest(_root_dir(), digest)
@@ -484,18 +507,39 @@ def provenance(
             offline=offline,
         )
         attestations = trust_report["attestations"]
-        parents = trace_training_lineage_parents(_root_dir(), digest, depth)
         advisories = list_advisories(_root_dir(), digest)
-        payload = {
+        trusted_active_advisories = [
+            a
+            for a in advisories
+            if a.get("status") == "active"
+            and isinstance(a.get("_trust"), dict)
+            and a.get("_trust", {}).get("signed_and_trusted") is True
+        ]
+        payload: Dict[str, Any] = {
             "ok": len(trust_report["violations"]) < 1,
+            "view": view,
             "artifact": str(artifact_path),
             "artifact_digest": digest,
             "attestation_count": len(attestations),
             "attestation_trust": trust_report["summary"],
             "attestation_violations": trust_report["violations"],
-            "parents": parents,
             "advisory_count": len(advisories),
+            "trusted_active_advisory_count": len(trusted_active_advisories),
         }
+
+        if view in {"trace", "explain"}:
+            payload["parents"] = trace_training_lineage_parents(_root_dir(), digest, depth)
+        if view in {"impact", "explain"}:
+            payload["descendants"] = trace_training_lineage_descendants(_root_dir(), digest, depth)
+        if view == "explain":
+            explanation: List[str] = []
+            if trust_report["violations"]:
+                explanation.append("attestation trust violations present")
+            if trusted_active_advisories:
+                explanation.append("trusted active advisories present")
+            if not explanation:
+                explanation.append("no immediate trust or advisory blockers detected")
+            payload["explain"] = explanation
         _emit(payload, json_output)
         if trust_report["violations"]:
             raise typer.Exit(code=1)
@@ -645,13 +689,39 @@ def export(
         attestations = trust_report["attestations"]
         if format not in {"in-toto", "slsa", "ml-bom", "aixv"}:
             raise ValueError(f"unsupported format: {format}")
-        payload = {
-            "format": format,
-            "artifact_digest": digest,
-            "attestations": attestations,
-            "attestation_trust": trust_report["summary"],
-            "attestation_violations": trust_report["violations"],
-        }
+        payload: Dict[str, Any]
+        if format == "in-toto":
+            payload = {
+                "format": "in-toto",
+                "artifact_digest": digest,
+                "statements": attestations,
+            }
+        elif format == "slsa":
+            payload = {
+                "format": "slsa",
+                "provenance": export_attestations_as_slsa(
+                    artifact_digest=digest,
+                    artifact_name=artifact_path.name,
+                    attestations=attestations,
+                ),
+            }
+        elif format == "ml-bom":
+            payload = {
+                "format": "ml-bom",
+                "bom": export_attestations_as_ml_bom(
+                    artifact_digest=digest,
+                    artifact_name=artifact_path.name,
+                    attestations=attestations,
+                ),
+            }
+        else:
+            payload = {
+                "format": "aixv",
+                "artifact_digest": digest,
+                "attestations": attestations,
+            }
+        payload["attestation_trust"] = trust_report["summary"]
+        payload["attestation_violations"] = trust_report["violations"]
         ok = len(trust_report["violations"]) < 1
         _emit({"ok": ok, "export": payload}, json_output)
         if not ok:
@@ -855,7 +925,9 @@ def record_verify(
 
 @record_app.command("create")
 def record_create(
-    kind: str = typer.Option(..., help="Record kind (e.g., policy, advisory, waiver, incident)"),
+    kind: str = typer.Option(
+        ..., help="Record kind (e.g., policy, advisory, bundle, waiver, incident)"
+    ),
     record_id: str = typer.Option(..., help="Record identifier"),
     input: str = typer.Option(..., "--input", "-i", help="Path to record payload JSON"),
     output: Optional[str] = typer.Option(None, help="Output path for signed record JSON"),
@@ -993,6 +1065,118 @@ def policy_verify(
         )
     except Exception as e:
         _emit({"ok": False, "error": str(e), "command": "policy verify"}, json_output)
+        raise typer.Exit(code=1)
+
+
+@bundle_app.command("create")
+def bundle_create(
+    input: str = typer.Option(..., "--input", "-i", help="Path to bundle payload JSON"),
+    bundle_id: Optional[str] = typer.Option(None, help="Bundle identifier override"),
+    output: Optional[str] = typer.Option(None, help="Output path for bundle record"),
+    sign: bool = typer.Option(False, help="Sign bundle record with Sigstore"),
+    identity_token: Optional[str] = typer.Option(None, help="OIDC token for keyless signing"),
+    identity_token_env: str = typer.Option(
+        "SIGSTORE_ID_TOKEN", help="Environment variable containing OIDC token"
+    ),
+    interactive_oidc: bool = typer.Option(
+        False, help="Acquire OIDC token interactively via browser"
+    ),
+    staging: bool = typer.Option(False, help="Use Sigstore staging instance"),
+    offline: bool = typer.Option(False, help="Use cached trust root only"),
+    json_output: bool = typer.Option(False, "--json", help="Deterministic JSON output"),
+):
+    """Create a strict multi-artifact bundle record."""
+    try:
+        input_path = ensure_artifact(input)
+        payload = read_json(str(input_path))
+        if bundle_id is not None:
+            payload["bundle_id"] = bundle_id
+        validated = validate_record_payload("bundle", payload)
+        resolved_bundle_id = validated["bundle_id"]
+        result = _create_and_optionally_sign_record(
+            kind="bundle",
+            record_id=resolved_bundle_id,
+            payload=validated,
+            output=output,
+            sign=sign,
+            identity_token=identity_token,
+            identity_token_env=identity_token_env,
+            interactive_oidc=interactive_oidc,
+            staging=staging,
+            offline=offline,
+        )
+        result["bundle_id"] = resolved_bundle_id
+        _emit(result, json_output)
+    except Exception as e:
+        _emit({"ok": False, "error": str(e), "command": "bundle create"}, json_output)
+        raise typer.Exit(code=1)
+
+
+@bundle_app.command("verify")
+def bundle_verify(
+    bundle_record: str = typer.Argument(..., help="Path to bundle record JSON"),
+    bundle: Optional[str] = typer.Option(None, help="Sigstore bundle path for bundle record"),
+    require_member: Optional[str] = typer.Option(
+        None, help="Required member digest (sha256:...) or path to local file"
+    ),
+    trusted_subject: Optional[str] = typer.Option(None, help="Trusted bundle signer subject"),
+    trusted_subjects: Optional[str] = typer.Option(
+        None, help="Comma-separated trusted bundle signer subjects"
+    ),
+    trusted_issuers: Optional[str] = typer.Option(
+        None, help="Comma-separated trusted bundle signer issuers"
+    ),
+    staging: bool = typer.Option(False, help="Use Sigstore staging instance"),
+    offline: bool = typer.Option(False, help="Use cached trust root only"),
+    json_output: bool = typer.Option(False, "--json", help="Deterministic JSON output"),
+):
+    """Verify signed bundle record and optional required membership."""
+    try:
+        record_path = ensure_artifact(bundle_record)
+        bundle_record_obj = load_signed_record(str(record_path), expected_kind="bundle")
+        validated_bundle = validate_record_payload("bundle", bundle_record_obj.payload)
+        bundle_in = resolve_signature_bundle_path(record_path, bundle)
+        if not bundle_in.exists():
+            raise FileNotFoundError(f"bundle not found: {bundle_in}")
+        subject_list = []
+        if trusted_subject:
+            subject_list.append(trusted_subject)
+        subject_list.extend(_parse_csv_values(trusted_subjects))
+        issuer_list = _parse_csv_values(trusted_issuers)
+        if len(subject_list) < 1:
+            raise ValueError("trusted subject constraints required")
+        signature_verification = verify_signed_record(
+            record_path=record_path,
+            bundle_path=bundle_in,
+            trusted_subjects=subject_list,
+            trusted_issuers=issuer_list,
+            staging=staging,
+            offline=offline,
+        )
+
+        required_digest: Optional[str] = None
+        if require_member:
+            candidate_path = Path(require_member)
+            if candidate_path.exists() and candidate_path.is_file():
+                required_digest = sha256_file(candidate_path)
+            else:
+                required_digest = normalize_sha256_digest(require_member)
+            if required_digest not in validated_bundle.get("members", []):
+                raise ValueError(f"required member digest not found in bundle: {required_digest}")
+
+        _emit(
+            {
+                "ok": True,
+                "bundle_path": str(record_path),
+                "bundle_record_id": bundle_record_obj.record_id,
+                "bundle_payload": validated_bundle,
+                "required_member": required_digest,
+                "signature_verification": signature_verification,
+            },
+            json_output,
+        )
+    except Exception as e:
+        _emit({"ok": False, "error": str(e), "command": "bundle verify"}, json_output)
         raise typer.Exit(code=1)
 
 

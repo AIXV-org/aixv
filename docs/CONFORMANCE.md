@@ -48,3 +48,6 @@ Runtime conformance report:
 - `policy.unknown-field.reject.v1`: unknown policy fields are rejected.
 - `policy.advisory-trust.subject-fallback.v1`: advisory trust roots fall back to policy `subject`.
 - `advisory.signed-policy.filtering.v1`: when signed advisories are required, untrusted advisories are ignored and trusted advisories drive enforcement.
+- `bundle.schema.validation.v1`: bundle records validate canonical multi-artifact membership semantics.
+- `crypto.invalid-bundle.artifact.reject.v1`: malformed artifact signature bundles are rejected fail-closed.
+- `crypto.invalid-bundle.statement.reject.v1`: malformed DSSE statement bundles are rejected fail-closed.

@@ -9,13 +9,18 @@ from aixv.core import (
     create_signed_record_payload,
     evaluate_admission,
     evaluate_advisory_policy,
+    evaluate_profile_requirements,
+    export_attestations_as_ml_bom,
+    export_attestations_as_slsa,
     load_attestation_records_for_digest,
     load_attestations_for_digest,
     load_signed_record,
     normalize_sha256_digest,
     sha256_file,
+    trace_training_lineage_descendants,
     trace_training_lineage_parents,
     validate_policy_payload,
+    validate_record_payload,
 )
 
 
@@ -209,3 +214,77 @@ def test_trace_training_lineage_parents_honors_depth(tmp_path: Path) -> None:
 
     assert len(two_hop) == 2
     assert {entry["digest"] for entry in two_hop} == {parent_digest, root_digest}
+
+    descendants = trace_training_lineage_descendants(tmp_path, root_digest, depth=2)
+    assert {entry["digest"] for entry in descendants} == {parent_digest, leaf_digest}
+
+
+def test_profile_requirements_for_regulated_policy() -> None:
+    violations = evaluate_profile_requirements(
+        profile="core-regulated",
+        policy_provided=True,
+        require_signed_policy=True,
+        policy={
+            "policy_type": "aixv.policy/v1",
+            "allow_subjects": ["alice@example.com"],
+            "require_signed_advisories": True,
+            "require_no_active_advisories": True,
+            "max_bundle_age_days": 7,
+        },
+    )
+    assert violations == []
+
+
+def test_export_adapters_emit_expected_shapes() -> None:
+    digest = f"sha256:{'1' * 64}"
+    parent = f"sha256:{'2' * 64}"
+    dataset = f"sha256:{'3' * 64}"
+    attestations = [
+        {
+            "_type": "https://in-toto.io/Statement/v1",
+            "subject": [
+                {"name": "model.safetensors", "digest": {"sha256": digest.split(":", 1)[1]}}
+            ],
+            "predicateType": "https://aixv.org/attestation/training/v1",
+            "predicate": {
+                "parent_models": [{"digest": parent}],
+                "datasets": [{"digest": dataset, "split": "train"}],
+                "training_run": {
+                    "framework": "pytorch",
+                    "framework_version": "2.2.0",
+                    "code_digest": digest,
+                    "environment_digest": digest,
+                },
+                "hyperparameters": {},
+            },
+        }
+    ]
+    slsa = export_attestations_as_slsa(
+        artifact_digest=digest,
+        artifact_name="model.safetensors",
+        attestations=attestations,
+    )
+    assert slsa["predicateType"] == "https://slsa.dev/provenance/v1"
+    assert len(slsa["buildDefinition"]["resolvedDependencies"]) == 2
+
+    bom = export_attestations_as_ml_bom(
+        artifact_digest=digest,
+        artifact_name="model.safetensors",
+        attestations=attestations,
+    )
+    assert bom["bom_format"] == "aixv.ml-bom/v1"
+    assert bom["component_count"] == 3
+
+
+def test_bundle_payload_validation_normalizes_primary_into_members() -> None:
+    payload = validate_record_payload(
+        "bundle",
+        {
+            "bundle_type": "aixv.bundle/v1",
+            "bundle_id": "bundle-main",
+            "primary": "1" * 64,
+            "members": [f"sha256:{'2' * 64}"],
+        },
+    )
+    assert payload["primary"] == f"sha256:{'1' * 64}"
+    assert payload["members"] == [f"sha256:{'2' * 64}", f"sha256:{'1' * 64}"]

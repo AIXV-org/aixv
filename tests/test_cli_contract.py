@@ -206,3 +206,135 @@ def test_rollback_no_sign_emits_plain_record() -> None:
         assert path.exists()
         payload = json.loads(path.read_text(encoding="utf-8"))
         assert payload["event_type"] == "rollback"
+
+
+def test_verify_profile_enterprise_requires_policy() -> None:
+    with runner.isolated_filesystem():
+        Path("model.safetensors").write_bytes(b"hello")
+        Path("model.safetensors.sigstore.json").write_text("{}", encoding="utf-8")
+        result = runner.invoke(
+            app,
+            [
+                "verify",
+                "model.safetensors",
+                "--identity",
+                "alice@example.com",
+                "--profile",
+                "core-enterprise",
+                "--json",
+            ],
+        )
+        assert result.exit_code == 1
+        out = json.loads(result.stdout)
+        assert out["ok"] is False
+        assert out["command"] == "verify"
+        assert "requires --policy" in out["error"]
+
+
+def test_provenance_impact_and_explain_views() -> None:
+    with runner.isolated_filesystem():
+        Path("model.safetensors").write_bytes(b"hello")
+        impact_result = runner.invoke(
+            app,
+            [
+                "provenance",
+                "model.safetensors",
+                "--view",
+                "impact",
+                "--json",
+            ],
+        )
+        assert impact_result.exit_code == 0
+        impact_payload = json.loads(impact_result.stdout)
+        assert impact_payload["view"] == "impact"
+        assert isinstance(impact_payload["descendants"], list)
+
+        explain_result = runner.invoke(
+            app,
+            [
+                "provenance",
+                "model.safetensors",
+                "--view",
+                "explain",
+                "--json",
+            ],
+        )
+        assert explain_result.exit_code == 0
+        explain_payload = json.loads(explain_result.stdout)
+        assert explain_payload["view"] == "explain"
+        assert isinstance(explain_payload["explain"], list)
+
+
+def test_export_slsa_and_ml_bom_shapes() -> None:
+    with runner.isolated_filesystem():
+        Path("model.safetensors").write_bytes(b"hello")
+
+        slsa = runner.invoke(
+            app,
+            ["export", "model.safetensors", "--format", "slsa", "--json"],
+        )
+        assert slsa.exit_code == 0
+        slsa_payload = json.loads(slsa.stdout)
+        assert slsa_payload["ok"] is True
+        assert slsa_payload["export"]["format"] == "slsa"
+        assert "provenance" in slsa_payload["export"]
+
+        ml_bom = runner.invoke(
+            app,
+            ["export", "model.safetensors", "--format", "ml-bom", "--json"],
+        )
+        assert ml_bom.exit_code == 0
+        ml_bom_payload = json.loads(ml_bom.stdout)
+        assert ml_bom_payload["ok"] is True
+        assert ml_bom_payload["export"]["format"] == "ml-bom"
+        assert "bom" in ml_bom_payload["export"]
+
+
+def test_bundle_create_validates_and_normalizes_members() -> None:
+    with runner.isolated_filesystem():
+        payload = {
+            "bundle_type": "aixv.bundle/v1",
+            "bundle_id": "bundle-main",
+            "primary": "1" * 64,
+            "members": [f"sha256:{'2' * 64}"],
+        }
+        Path("bundle.json").write_text(json.dumps(payload), encoding="utf-8")
+        result = runner.invoke(
+            app,
+            ["bundle", "create", "--input", "bundle.json", "--json"],
+        )
+        assert result.exit_code == 0
+        out = json.loads(result.stdout)
+        record = json.loads(Path(out["path"]).read_text(encoding="utf-8"))
+        assert record["kind"] == "bundle"
+        members = record["payload"]["members"]
+        assert f"sha256:{'1' * 64}" in members
+        assert f"sha256:{'2' * 64}" in members
+
+
+def test_bundle_verify_requires_trusted_subject_constraints() -> None:
+    with runner.isolated_filesystem():
+        bundle_record = {
+            "schema": "aixv.signed-record/v1",
+            "kind": "bundle",
+            "record_id": "bundle-main",
+            "created_at": "2026-02-16T00:00:00+00:00",
+            "payload": {
+                "bundle_type": "aixv.bundle/v1",
+                "bundle_id": "bundle-main",
+                "primary": f"sha256:{'1' * 64}",
+                "members": [f"sha256:{'1' * 64}", f"sha256:{'2' * 64}"],
+            },
+            "signature_bundle_path": "bundle.sigstore.json",
+        }
+        Path("bundle.record.json").write_text(json.dumps(bundle_record), encoding="utf-8")
+        Path("bundle.sigstore.json").write_text("{}", encoding="utf-8")
+        result = runner.invoke(
+            app,
+            ["bundle", "verify", "bundle.record.json", "--json"],
+        )
+        assert result.exit_code == 1
+        out = json.loads(result.stdout)
+        assert out["ok"] is False
+        assert out["command"] == "bundle verify"
+        assert "trusted subject constraints required" in out["error"]

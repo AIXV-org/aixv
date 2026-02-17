@@ -5,6 +5,7 @@
 Core kinds:
 - `policy`
 - `advisory`
+- `bundle`
 
 Provisional kinds:
 - `waiver`

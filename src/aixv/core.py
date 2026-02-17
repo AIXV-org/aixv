@@ -34,6 +34,7 @@ ALLOWED_SEVERITIES = {"low", "medium", "high", "critical"}
 ALLOWED_ADVISORY_STATUS = {"active", "mitigated", "withdrawn"}
 SEVERITY_RANK = {"low": 1, "medium": 2, "high": 3, "critical": 4}
 ATTESTATION_RECORD_SCHEMA = "aixv.attestation-record/v1"
+ALLOWED_PROFILES = {"core-minimal", "core-enterprise", "core-regulated"}
 
 
 class ParentModel(BaseModel):
@@ -102,6 +103,26 @@ class AdvisoryPredicate(BaseModel):
             raise ValueError(f"invalid severity: {self.severity}")
         if self.status not in ALLOWED_ADVISORY_STATUS:
             raise ValueError(f"invalid status: {self.status}")
+
+
+class ArtifactBundle(BaseModel):
+    bundle_type: str = "aixv.bundle/v1"
+    bundle_id: str
+    primary: str
+    members: List[str] = Field(min_length=1)
+
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    def model_post_init(self, __context: Any) -> None:
+        self.primary = normalize_sha256_digest(self.primary)
+        normalized_members: List[str] = []
+        for member in self.members:
+            digest = normalize_sha256_digest(member)
+            if digest not in normalized_members:
+                normalized_members.append(digest)
+        if self.primary not in normalized_members:
+            normalized_members.append(self.primary)
+        self.members = normalized_members
 
 
 class VerifyPolicy(BaseModel):
@@ -279,6 +300,14 @@ def validate_policy_payload(raw: Dict[str, Any]) -> Dict[str, Any]:
     return parsed.model_dump()
 
 
+def validate_bundle_payload(raw: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        parsed = ArtifactBundle.model_validate(raw)
+    except ValidationError as e:
+        raise ValueError(str(e))
+    return parsed.model_dump()
+
+
 def advisory_trust_constraints_from_policy(policy: Dict[str, Any]) -> Dict[str, List[str]]:
     subjects = _normalize_string_list(policy.get("advisory_allow_subjects"))
     issuers = _normalize_string_list(policy.get("advisory_allow_issuers"))
@@ -298,6 +327,42 @@ def advisory_trust_constraints_from_policy(policy: Dict[str, Any]) -> Dict[str, 
             issuers = [issuer.strip()]
 
     return {"subjects": subjects, "issuers": issuers}
+
+
+def evaluate_profile_requirements(
+    *,
+    profile: Optional[str],
+    policy_provided: bool,
+    require_signed_policy: bool,
+    policy: Dict[str, Any],
+) -> List[str]:
+    if profile is None:
+        return []
+    if profile not in ALLOWED_PROFILES:
+        return [f"unsupported profile: {profile}"]
+
+    violations: List[str] = []
+    if profile in {"core-enterprise", "core-regulated"}:
+        if not policy_provided:
+            violations.append(f"profile {profile} requires --policy")
+        if not require_signed_policy:
+            violations.append(f"profile {profile} requires signed policy verification")
+        if not bool(policy.get("require_signed_advisories", False)):
+            violations.append(f"profile {profile} requires require_signed_advisories=true")
+        advisory_trust = advisory_trust_constraints_from_policy(policy)
+        if len(advisory_trust["subjects"]) < 1:
+            violations.append(
+                f"profile {profile} requires advisory trust subjects via "
+                "advisory_allow_subjects or subject/allow_subjects"
+            )
+
+    if profile == "core-regulated":
+        if policy.get("max_bundle_age_days") is None:
+            violations.append("profile core-regulated requires max_bundle_age_days")
+        if not bool(policy.get("require_no_active_advisories", False)):
+            violations.append("profile core-regulated requires require_no_active_advisories=true")
+
+    return violations
 
 
 def resolve_predicate_uri(predicate: str) -> str:
@@ -654,6 +719,95 @@ def load_attestations_for_digest(root: Path, digest: str) -> List[Dict[str, Any]
     return results
 
 
+def load_all_attestation_records(root: Path) -> List[Dict[str, Any]]:
+    results: List[Dict[str, Any]] = []
+    store = attestation_store(root)
+    if not store.exists():
+        return results
+    for path in sorted(store.glob("*.json")):
+        try:
+            raw = read_json(str(path))
+        except Exception:
+            continue
+        statement: Optional[Dict[str, Any]] = None
+        signature_bundle_path: Optional[str] = None
+        if isinstance(raw, dict) and raw.get("schema") == ATTESTATION_RECORD_SCHEMA:
+            candidate = raw.get("statement")
+            if isinstance(candidate, dict):
+                statement = candidate
+            bundle_candidate = raw.get("signature_bundle_path")
+            if isinstance(bundle_candidate, str) and bundle_candidate.strip():
+                signature_bundle_path = bundle_candidate
+        elif isinstance(raw, dict):
+            statement = raw
+            bundle_candidate = raw.get("signature_bundle_path")
+            if isinstance(bundle_candidate, str) and bundle_candidate.strip():
+                signature_bundle_path = bundle_candidate
+        if not isinstance(statement, dict):
+            continue
+        if not signature_bundle_path:
+            default_bundle = path.with_name(f"{path.name}.sigstore.json")
+            if default_bundle.exists():
+                signature_bundle_path = str(default_bundle)
+        results.append(
+            {
+                "path": str(path),
+                "statement": statement,
+                "signature_bundle_path": signature_bundle_path,
+            }
+        )
+    return results
+
+
+def summarize_training_lineage_from_attestations(
+    attestations: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    parent_digests: List[str] = []
+    dataset_digests: List[str] = []
+    training_runs: List[Dict[str, Any]] = []
+
+    for att in attestations:
+        if att.get("predicateType") != PREDICATE_ALIASES["training"]:
+            continue
+        predicate = att.get("predicate", {})
+        if not isinstance(predicate, dict):
+            continue
+        for parent in predicate.get("parent_models", []):
+            if not isinstance(parent, dict):
+                continue
+            token = parent.get("digest")
+            if not isinstance(token, str):
+                continue
+            try:
+                digest = normalize_sha256_digest(token)
+            except ValueError:
+                continue
+            if digest not in parent_digests:
+                parent_digests.append(digest)
+        for dataset in predicate.get("datasets", []):
+            if not isinstance(dataset, dict):
+                continue
+            token = dataset.get("digest")
+            if not isinstance(token, str):
+                continue
+            try:
+                digest = normalize_sha256_digest(token)
+            except ValueError:
+                continue
+            if digest not in dataset_digests:
+                dataset_digests.append(digest)
+        run = predicate.get("training_run")
+        if isinstance(run, dict):
+            training_runs.append(run)
+
+    return {
+        "parent_digests": parent_digests,
+        "dataset_digests": dataset_digests,
+        "training_run_count": len(training_runs),
+        "training_runs": training_runs,
+    }
+
+
 def create_advisory_record(
     *,
     root: Path,
@@ -827,6 +981,8 @@ def validate_record_payload(kind: str, payload: Dict[str, Any]) -> Dict[str, Any
         return validate_policy_payload(payload)
     if kind == "advisory":
         return validate_predicate(PREDICATE_ALIASES["advisory"], payload)
+    if kind == "bundle":
+        return validate_bundle_payload(payload)
     return payload
 
 
@@ -956,6 +1112,106 @@ def trace_training_lineage_parents(
                 frontier.append((normalized_parent, current_depth + 1))
 
     return out
+
+
+def trace_training_lineage_descendants(
+    root: Path, artifact_digest: str, depth: int
+) -> List[Dict[str, Any]]:
+    if depth < 1:
+        return []
+    start = normalize_sha256_digest(artifact_digest)
+    edges: Dict[str, List[str]] = {}
+    for entry in load_all_attestation_records(root):
+        statement = entry.get("statement")
+        if not isinstance(statement, dict):
+            continue
+        subjects = statement.get("subject", [])
+        if not isinstance(subjects, list):
+            continue
+        subject_digests: List[str] = []
+        for subject in subjects:
+            if not isinstance(subject, dict):
+                continue
+            digest_map = subject.get("digest")
+            if not isinstance(digest_map, dict):
+                continue
+            token = digest_map.get("sha256")
+            if not isinstance(token, str):
+                continue
+            try:
+                subject_digests.append(normalize_sha256_digest(token))
+            except ValueError:
+                continue
+        if not subject_digests:
+            continue
+        summary = summarize_training_lineage_from_attestations([statement])
+        parent_digests = summary["parent_digests"]
+        for parent in parent_digests:
+            edges.setdefault(parent, [])
+            for child in subject_digests:
+                if child not in edges[parent]:
+                    edges[parent].append(child)
+
+    visited = {start}
+    frontier = deque([(start, 1)])
+    out: List[Dict[str, Any]] = []
+
+    while frontier:
+        parent, current_depth = frontier.popleft()
+        for child in edges.get(parent, []):
+            out.append({"digest": child, "parent_digest": parent, "depth": current_depth})
+            if current_depth < depth and child not in visited:
+                visited.add(child)
+                frontier.append((child, current_depth + 1))
+
+    return out
+
+
+def _sha256_hex_token(digest: str) -> str:
+    return normalize_sha256_digest(digest).split(":", 1)[1]
+
+
+def export_attestations_as_slsa(
+    *, artifact_digest: str, artifact_name: str, attestations: List[Dict[str, Any]]
+) -> Dict[str, Any]:
+    summary = summarize_training_lineage_from_attestations(attestations)
+    materials = summary["parent_digests"] + summary["dataset_digests"]
+    out_materials: List[Dict[str, Any]] = []
+    for digest in materials:
+        out_materials.append({"uri": digest, "digest": {"sha256": _sha256_hex_token(digest)}})
+    return {
+        "predicateType": "https://slsa.dev/provenance/v1",
+        "subject": [
+            {"name": artifact_name, "digest": {"sha256": _sha256_hex_token(artifact_digest)}}
+        ],
+        "buildDefinition": {
+            "buildType": "aixv/training",
+            "externalParameters": {"attestation_count": len(attestations)},
+            "resolvedDependencies": out_materials,
+        },
+        "runDetails": {
+            "builder": {"id": "aixv"},
+            "metadata": {"training_run_count": summary["training_run_count"]},
+        },
+    }
+
+
+def export_attestations_as_ml_bom(
+    *, artifact_digest: str, artifact_name: str, attestations: List[Dict[str, Any]]
+) -> Dict[str, Any]:
+    summary = summarize_training_lineage_from_attestations(attestations)
+    components: List[Dict[str, Any]] = [
+        {"name": artifact_name, "digest": artifact_digest, "role": "model"}
+    ]
+    for digest in summary["parent_digests"]:
+        components.append({"digest": digest, "role": "parent-model"})
+    for digest in summary["dataset_digests"]:
+        components.append({"digest": digest, "role": "dataset"})
+    return {
+        "bom_format": "aixv.ml-bom/v1",
+        "component_count": len(components),
+        "components": components,
+    }
 
 
 def _extract_subject_candidates(cert: Any) -> List[str]:

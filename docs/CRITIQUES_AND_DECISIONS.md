@@ -102,6 +102,49 @@ Decision:
 Status:
 - Implemented in `provenance` and `export` CLI flows.
 
+## 9. "Profiles are documented but not enforced"
+
+Risk:
+- Organizations cannot reliably prove they are operating in a specific assurance profile.
+
+Decision:
+- Added verifier profile gates:
+  - `verify --profile core-minimal`
+  - `verify --profile core-enterprise`
+  - `verify --profile core-regulated`
+- Profile gates enforce required policy controls and signed-control-plane constraints.
+
+Status:
+- Implemented.
+
+## 10. "Lineage investigation needs explicit trace/impact/explain modes"
+
+Risk:
+- Operators cannot quickly pivot from compromised ancestor to impacted descendants or produce compact explanations.
+
+Decision:
+- `provenance` now supports:
+  - `--view trace` (ancestors),
+  - `--view impact` (descendants),
+  - `--view explain` (condensed trust/advisory evidence).
+
+Status:
+- Implemented.
+
+## 11. "Single-file trust is not enough for model releases"
+
+Risk:
+- Real releases ship multiple artifacts (weights, tokenizer, config); single-artifact trust checks are insufficient.
+
+Decision:
+- Added strict signed bundle records (`kind=bundle`, `aixv.bundle/v1`) with:
+  - canonical digest normalization,
+  - primary-member consistency,
+  - signature verification and optional required-member checks.
+
+Status:
+- Implemented via `bundle create` and `bundle verify`.
+
 ## Next hardening steps
 
 1. Add signed remote advisory feed ingestion with replay/freshness protection.

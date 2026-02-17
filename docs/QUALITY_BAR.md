@@ -12,6 +12,7 @@ This is the minimal bar for production-grade provenance verification in AIXV.
 
 - Policy is treated as a signed record (`kind=policy`) and can be verified independently.
 - Advisories are treated as signed records (`kind=advisory`) and can be required-signed by policy.
+- Multi-artifact bundles are represented as signed bundle records (`kind=bundle`, `aixv.bundle/v1`).
 - When `require_signed_advisories=true`, only signed-and-trusted advisories influence admission outcomes.
 - Rollback records are signed by default (`rollback --sign`), preserving append-only evidence.
 - Admission decisions are explicit and machine-readable (`allow|deny`, violations, evidence).
@@ -38,3 +39,4 @@ This is the minimal bar for production-grade provenance verification in AIXV.
 
 - Commands support deterministic JSON output (`--json`) for CI/CD and admission hooks.
 - Decision outcomes are reproducible from signed evidence + policy.
+- Verifier profile gates (`core-minimal|core-enterprise|core-regulated`) provide explicit assurance mode enforcement.
