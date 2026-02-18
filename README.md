@@ -5,7 +5,10 @@
   />
 </p>
 
-# AIXV - AI Integrity eXchange & Verification
+# AIXV — AI Integrity eXchange & Verification
+
+> Pronounced **A-I-X-V**
+
 <!--- @begin-badges@ --->
 [![CI](https://github.com/aixv-org/aixv/actions/workflows/ci.yml/badge.svg)](https://github.com/aixv-org/aixv/actions/workflows/ci.yml)
 [![Conformance](https://github.com/aixv-org/aixv/actions/workflows/conformance.yml/badge.svg)](https://github.com/aixv-org/aixv/actions/workflows/conformance.yml)
@@ -14,7 +17,7 @@
 [![PyPI version](https://badge.fury.io/py/aixv.svg)](https://pypi.org/project/aixv)
 <!--- @end-badges@ --->
 
-**AIXV** is an open standard for AI artifact attestation, provenance, rollback, compromise detection, and investigation.
+**AIXV** is an open standard for AI supply chain integrity: artifact attestation, provenance, rollback, compromise detection, and investigation.
 
 In practical terms, AIXV helps organizations answer high-stakes questions before deploying or accepting AI artifacts:
 - What exactly is this artifact?
@@ -54,9 +57,9 @@ This repository is a functional preview of the AIXV standard, but not yet a fina
 
 ### Still evolving
 
+- Formal governance: external steering, independent audit signals, and advisory CNA-like process.
 - Broader conformance vector coverage and certification workflow.
-- Formal governance and external audit signals.
-- Wider ecosystem integrations and migration tooling.
+- Wider ecosystem integrations and publisher onboarding tooling.
 
 ## Adoption Signals
 

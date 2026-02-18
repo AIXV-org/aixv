@@ -261,11 +261,26 @@ To become a world standard, governance matters as much as code:
 - Separate specification governance from single-vendor implementation.
 - Operate transparent advisory CNA-like process for AI incidents.
 
-## 17. Minimal Implementation Roadmap
+## 17. Implementation Status
 
-1. Integrate `sigstore` dependency and implement production-grade `sign`/`verify` wrappers.
-2. Implement `training/v1` and `advisory/v1` predicates.
-3. Add local lineage graph store and deterministic graph queries (`trace`, `impact`).
-4. Add admission policy engine and CI/CD hooks.
-5. Add export adapters (in-toto, SLSA, ML-BOM).
-6. Ship conformance tests and reference fixtures.
+### Implemented (v0.2.x)
+
+1. Production-grade `sign`/`verify` wrappers over Sigstore keyless (OIDC) signing.
+2. `training/v1` and `advisory/v1` predicates with strict schema validation.
+3. Local lineage graph store with deterministic graph queries (`trace`, `impact`, `explain`).
+4. Admission policy engine with identity, freshness, and advisory controls.
+5. Export adapters: in-toto, SLSA, ML-BOM, and 30+ additional formats.
+6. Conformance test suite with machine-readable output (`aixv conformance --json`).
+7. Signed bundle records for multi-artifact model releases.
+8. Assurance-level gates (`level-1` through `level-3`) enforced at verification time.
+9. Provenance graph UI with 22+ model families indexed at track.aixv.org.
+10. Cross-system bridge: `ProvenanceNodeSubject` and `attest_provenance_node` connecting
+    the graph layer to the cryptographic attestation layer (see `docs/PROVENANCE_BRIDGE.md`).
+
+### Next
+
+1. Authenticated advisory feed discovery and rotation (beyond direct feed URL ingestion).
+2. Publisher onboarding tooling: GitHub Actions workflow template, model card integration.
+3. Formal governance: external steering group, independent audit signals, advisory CNA process.
+4. Additional conformance vectors for malformed feed and rollback edge cases.
+5. Organization-ready policy packs built on `policy template` / `policy migrate`.
