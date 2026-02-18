@@ -408,6 +408,191 @@ def make_statement(
     }
 
 
+# ---------------------------------------------------------------------------
+# Provenance Graph Bridge
+#
+# These helpers connect the TypeScript provenance graph (track.aixv.org) to
+# the Python attestation package.  They are the Python-side counterparts to
+# the TypeScript `AixvSubject` type in types.ts.
+#
+# The join key between the two systems is the SHA-256 digest of the artifact
+# file.  A graph node's `weights.digest` (TypeScript) must equal the digest
+# produced by `sha256_file()` (Python) on the same artifact bytes.
+#
+# Usage — AIXV operator attesting a published model:
+#
+#   subject = ProvenanceNodeSubject(
+#       digest="sha256:f6eab253...",          # from weights.digest in the template
+#       uri="https://huggingface.co/apple/OpenELM-3B/tree/f6eab253...",
+#       name="OpenELM-3B",
+#   )
+#   predicate = TrainingPredicate(
+#       parent_models=[ParentModel(digest="sha256:...", uri="...")],
+#       datasets=[DatasetRef(digest="sha256:...")],
+#       training_run=TrainingRun(...),
+#   )
+#   result = attest_provenance_node(
+#       root=Path("."),
+#       subject=subject,
+#       predicate_uri="training",
+#       predicate_payload=predicate.model_dump(),
+#       identity_token_env="SIGSTORE_ID_TOKEN",
+#   )
+#   # result["attestation_bundle_uri"] → set this as weights.attestationBundleUri
+#   # in the TypeScript template to mark the node as "attested" in the UI.
+# ---------------------------------------------------------------------------
+
+
+class ProvenanceNodeSubject:
+    """
+    Typed subject identity for a provenance graph node.
+
+    Mirrors the TypeScript `AixvSubject` type in types.ts.  The `digest` field
+    is the join key: it must match `weights.digest` in the TypeScript template
+    and the output of `sha256_file()` on the actual artifact bytes.
+
+    Args:
+        digest: Full SHA-256 digest in "sha256:<hex>" form.  Required.
+        uri:    Canonical URI for the artifact (HuggingFace tree URL, OCI ref,
+                etc).  Optional but strongly recommended for traceability.
+        name:   Human-readable artifact name used as the in-toto subject name.
+                Defaults to the hex portion of the digest.
+    """
+
+    def __init__(self, *, digest: str, uri: Optional[str] = None, name: Optional[str] = None):
+        self.digest = normalize_sha256_digest(digest)
+        self.uri = uri
+        hex_part = self.digest.split(":", 1)[1]
+        self.name = name or hex_part[:16]
+
+    def to_intoto_subject(self) -> Dict[str, Any]:
+        """Return the in-toto subject entry for this node."""
+        return {
+            "name": self.name,
+            "digest": {"sha256": self.digest.split(":", 1)[1]},
+        }
+
+
+def make_provenance_node_statement(
+    subject: "ProvenanceNodeSubject",
+    predicate_uri: str,
+    predicate_payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    Build an in-toto Statement/v1 for a provenance graph node identified by
+    a ``ProvenanceNodeSubject`` rather than a local file path.
+
+    Use this when attesting a published artifact (e.g. a HuggingFace model)
+    whose weights you have identified by digest but may not have downloaded.
+
+    The resulting statement is structurally identical to ``make_statement()``
+    and can be signed with ``sign_statement_with_sigstore()``.
+
+    Args:
+        subject:           Node subject (digest + uri + name).
+        predicate_uri:     Full predicate URI or alias ("training", "advisory").
+        predicate_payload: Validated predicate dict (TrainingPredicate.model_dump()
+                           or AdvisoryPredicate.model_dump()).
+
+    Returns:
+        in-toto Statement/v1 dict ready for signing.
+    """
+    uri = resolve_predicate_uri(predicate_uri)
+    return {
+        "_type": "https://in-toto.io/Statement/v1",
+        "subject": [subject.to_intoto_subject()],
+        "predicateType": uri,
+        "predicate": predicate_payload,
+    }
+
+
+def attest_provenance_node(
+    *,
+    root: Path,
+    subject: "ProvenanceNodeSubject",
+    predicate_uri: str,
+    predicate_payload: Dict[str, Any],
+    identity_token: Optional[str] = None,
+    identity_token_env: str = "SIGSTORE_ID_TOKEN",
+    interactive_oidc: bool = False,
+    staging: bool = False,
+    offline: bool = False,
+    sign: bool = True,
+) -> Dict[str, Any]:
+    """
+    End-to-end helper: build, optionally sign, and store an attestation for a
+    provenance graph node identified by a ``ProvenanceNodeSubject``.
+
+    This is the primary entry point for AIXV operators attesting published
+    models that are already indexed in the provenance graph (track.aixv.org).
+
+    After calling this function:
+    - The attestation record is written to ``.aixv/attestations/``.
+    - If ``sign=True``, a Sigstore bundle is written alongside it.
+    - The returned ``attestation_bundle_uri`` value should be set as
+      ``weights.attestationBundleUri`` in the TypeScript template to mark the
+      node as "attested" in the UI.
+
+    Args:
+        root:                 Repository root (parent of ``.aixv/``).
+        subject:              Node subject (digest + uri + name).
+        predicate_uri:        Full predicate URI or alias ("training", "advisory").
+        predicate_payload:    Predicate dict (will be validated).
+        identity_token:       OIDC token string (optional).
+        identity_token_env:   Env var name for OIDC token (default: SIGSTORE_ID_TOKEN).
+        interactive_oidc:     If True, open browser for interactive OIDC flow.
+        staging:              Use Sigstore staging environment.
+        offline:              Use offline trust config.
+        sign:                 If True (default), sign the statement with Sigstore.
+                              If False, write an unsigned attestation record only.
+
+    Returns:
+        Dict with keys:
+          - ``statement``: the in-toto statement dict
+          - ``attestation_record_path``: path to the written record
+          - ``attestation_bundle_uri``: file URI of the Sigstore bundle (if signed)
+          - ``signed``: bool
+    """
+    validated_payload = validate_predicate(predicate_uri, predicate_payload)
+    statement = make_provenance_node_statement(subject, predicate_uri, validated_payload)
+
+    bundle_out: Optional[Path] = None
+    signature_bundle_path: Optional[str] = None
+
+    if sign:
+        # Derive a stable bundle path from the subject digest.
+        hex_part = subject.digest.split(":", 1)[1]
+        predicate_key = resolve_predicate_uri(predicate_uri).rstrip("/").split("/")
+        key = f"{predicate_key[-2]}.{predicate_key[-1]}" if len(predicate_key) >= 2 else predicate_key[-1]
+        bundle_out = attestation_store(root) / f"{hex_part}.{key}.sigstore.json"
+        bundle_out.parent.mkdir(parents=True, exist_ok=True)
+        sign_statement_with_sigstore(
+            statement=statement,
+            bundle_out=bundle_out,
+            identity_token=identity_token,
+            identity_token_env=identity_token_env,
+            interactive_oidc=interactive_oidc,
+            staging=staging,
+            offline=offline,
+        )
+        signature_bundle_path = str(bundle_out)
+
+    record_path = create_attestation_record(
+        root=root,
+        artifact=Path(subject.name),  # logical name only; digest is the real identity
+        predicate_uri=resolve_predicate_uri(predicate_uri),
+        statement=statement,
+        signature_bundle_path=signature_bundle_path,
+    )
+
+    return {
+        "statement": statement,
+        "attestation_record_path": str(record_path),
+        "attestation_bundle_uri": bundle_out.as_uri() if bundle_out else None,
+        "signed": sign and bundle_out is not None,
+    }
+
+
 def load_identity_token(
     *,
     identity_token: Optional[str],
