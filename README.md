@@ -77,6 +77,7 @@ For security and procurement reviews, the strongest immediate signals are:
 - `docs/THREAT_MODEL.md`
 - `docs/COMPATIBILITY.md`
 - `docs/PROVENANCE_BRIDGE.md`
+- `docs/PUBLISHER_GUIDE.md`
 - `docs/TERMINOLOGY.md`
 - `docs/REGISTRIES.md`
 - `docs/ASSURANCE_LEVELS.md`
