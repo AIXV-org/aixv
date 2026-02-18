@@ -7,8 +7,6 @@
 
 # AIXV — AI Integrity eXchange & Verification
 
-> Pronounced **A-I-X-V**
-
 <!--- @begin-badges@ --->
 [![CI](https://github.com/aixv-org/aixv/actions/workflows/ci.yml/badge.svg)](https://github.com/aixv-org/aixv/actions/workflows/ci.yml)
 [![Conformance](https://github.com/aixv-org/aixv/actions/workflows/conformance.yml/badge.svg)](https://github.com/aixv-org/aixv/actions/workflows/conformance.yml)
@@ -16,6 +14,8 @@
 [![Scorecard Workflow](https://github.com/aixv-org/aixv/actions/workflows/scorecard.yml/badge.svg)](https://github.com/aixv-org/aixv/actions/workflows/scorecard.yml)
 [![PyPI version](https://badge.fury.io/py/aixv.svg)](https://pypi.org/project/aixv)
 <!--- @end-badges@ --->
+
+> Pronounced **A-I-X-V**
 
 **AIXV** is an open standard for AI supply chain integrity: artifact attestation, provenance, rollback, compromise detection, and investigation.
 
