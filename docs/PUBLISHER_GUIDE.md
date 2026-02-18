@@ -57,41 +57,88 @@ Save this value. You'll use it in the next step and in your model card.
 
 ## Step 2: Prepare your training predicate
 
-Create a `training.json` file describing your model's lineage:
+Create a `training.json` file describing your model's lineage. The only required
+field is `training_run.framework` — everything else is optional but increases the
+value of the attestation. Start with what you know; you can always add more later.
 
+**Minimum (always valid — honest weak evidence):**
+```json
+{
+  "training_run": { "framework": "PyTorch" }
+}
+```
+
+**Typical open model release (what most teams can provide):**
 ```json
 {
   "parent_models": [
     {
-      "digest": "sha256:<hex-of-parent-weights>",
-      "uri": "https://huggingface.co/org/parent-model"
+      "uri": "https://huggingface.co/meta-llama/Llama-2-7b",
+      "name": "Llama 2 7B"
     }
   ],
   "datasets": [
     {
-      "digest": "sha256:<hex-of-dataset>",
-      "uri": "https://huggingface.co/datasets/org/dataset",
+      "uri": "https://huggingface.co/datasets/allenai/dolma",
+      "name": "Dolma v1.7",
       "split": "train"
     }
   ],
   "training_run": {
     "framework": "PyTorch",
     "framework_version": "2.3.0",
-    "code_digest": "sha256:<hex-of-training-code-commit>",
-    "environment_digest": "sha256:<hex-of-container-image>"
+    "code_uri": "https://github.com/org/training-code@abc1234"
   }
 }
 ```
 
-**Notes:**
-- `parent_models`: include every model your weights were initialized from. For a model
-  trained from scratch, this array is empty.
-- `datasets`: include every dataset used in training. Use the actual file digest if
-  you have it; the URI alone is acceptable for a first attestation.
-- `training_run.code_digest`: the SHA-256 of your training code. If you use GitHub,
-  you can use the commit SHA converted to a digest, or hash your training script.
-- All digests use `sha256:<hex>` format. Unknown values can be omitted — partial
-  provenance is better than no provenance.
+**Maximum (when you have everything — strongest evidence):**
+```json
+{
+  "parent_models": [
+    {
+      "digest": "sha256:f6eab253...",
+      "uri": "https://huggingface.co/meta-llama/Llama-2-7b/tree/f6eab253...",
+      "name": "Llama 2 7B"
+    }
+  ],
+  "datasets": [
+    {
+      "manifest_digest": "sha256:a3b1c2...",
+      "uri": "https://huggingface.co/datasets/allenai/dolma",
+      "name": "Dolma v1.7",
+      "split": "train"
+    }
+  ],
+  "training_run": {
+    "framework": "PyTorch",
+    "framework_version": "2.3.0",
+    "code_uri": "https://github.com/org/training-code@abc1234",
+    "environment_uri": "ghcr.io/org/training-env:v1.2",
+    "environment_digest": "sha256:9f2e1a...",
+    "compute": { "gpu": "H100", "count": 64, "training_hours": 720 }
+  },
+  "hyperparameters": {
+    "learning_rate": 2e-5,
+    "batch_size": 128,
+    "epochs": 3
+  }
+}
+```
+
+**Field guidance:**
+- `parent_models`: models your weights were initialized from. Omit entirely for
+  models trained from scratch (base models). `uri` alone is valid; add `digest`
+  when you have the actual weight file hash.
+- `datasets`: include every dataset used. `name` alone is valid; add `uri` for
+  traceability, `manifest_digest` if you have a manifest file you can hash.
+  For multi-shard datasets, hash the manifest/index file, not the shards.
+- `training_run.code_uri`: use `repo_url@commit_sha` form. This is what most
+  teams have. Do NOT put a git commit SHA in `code_digest` — they are different
+  things (git SHAs are not SHA-256 file digests).
+- `training_run.compute`: free-form — record whatever you have. No schema
+  enforcement; it's preserved as-is in the attestation.
+- `notes`: free text for anything that doesn't fit the structured fields.
 
 ---
 

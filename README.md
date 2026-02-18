@@ -73,6 +73,7 @@ For security and procurement reviews, the strongest immediate signals are:
 
 - `docs/AIXV_STANDARD.md`
 - `docs/NORMATIVE_CORE.md`
+- `docs/DESIGN_PRINCIPLES.md`
 - `docs/QUALITY.md`
 - `docs/THREAT_MODEL.md`
 - `docs/COMPATIBILITY.md`

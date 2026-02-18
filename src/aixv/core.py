@@ -40,41 +40,156 @@ RECORD_ID_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 
 
 class ParentModel(BaseModel):
-    digest: str
+    """
+    A model artifact that was used as a starting point for training.
+
+    At least one of ``digest``, ``uri``, or ``name`` must be provided.
+    Providing ``digest`` is strongly recommended — it is the only field that
+    cryptographically binds this entry to a specific artifact.
+
+    ``uri`` is an identification claim (where it came from), not a verification
+    claim. A URI alone does not prove what bytes were used.
+    """
+
+    digest: Optional[str] = None
+    """sha256:<hex> of the weight file. The join key to the attestation layer."""
     uri: Optional[str] = None
+    """Canonical URI — HuggingFace tree URL, OCI ref, etc."""
+    name: Optional[str] = None
+    """Human-readable name for display (e.g. 'Llama 2 7B')."""
     model_config = ConfigDict(extra="forbid")
 
     def model_post_init(self, __context: Any) -> None:
-        self.digest = normalize_sha256_digest(self.digest)
+        if self.digest is None and self.uri is None and self.name is None:
+            raise ValueError("parent_model requires at least one of: digest, uri, name")
+        if self.digest is not None:
+            self.digest = normalize_sha256_digest(self.digest)
 
 
 class DatasetRef(BaseModel):
-    digest: str
+    """
+    A dataset used during training, fine-tuning, or alignment.
+
+    Datasets are often collections (many shards, a manifest, a registry entry)
+    rather than single files. Use ``digest`` when you have hashed a primary
+    file or a canonical single-file representation. Use ``manifest_digest``
+    when you have hashed a manifest or index file that enumerates the collection.
+    Use ``uri`` when you have a stable canonical reference but no file digest.
+
+    At least one of ``digest``, ``manifest_digest``, ``uri``, or ``name`` must
+    be provided.
+    """
+
+    digest: Optional[str] = None
+    """sha256:<hex> of the primary dataset file or a canonical single-file form."""
+    manifest_digest: Optional[str] = None
+    """sha256:<hex> of a manifest/index file enumerating the collection."""
     uri: Optional[str] = None
+    """Canonical URI — HuggingFace datasets URL, S3 path, etc."""
+    name: Optional[str] = None
+    """Human-readable name (e.g. 'Dolma v1.7', 'The Pile')."""
     split: Optional[str] = None
+    """Dataset split used: 'train', 'eval', 'test', 'rlhf', or a custom label."""
     model_config = ConfigDict(extra="forbid")
 
     def model_post_init(self, __context: Any) -> None:
-        self.digest = normalize_sha256_digest(self.digest)
+        if (
+            self.digest is None
+            and self.manifest_digest is None
+            and self.uri is None
+            and self.name is None
+        ):
+            raise ValueError(
+                "dataset_ref requires at least one of: digest, manifest_digest, uri, name"
+            )
+        if self.digest is not None:
+            self.digest = normalize_sha256_digest(self.digest)
+        if self.manifest_digest is not None:
+            self.manifest_digest = normalize_sha256_digest(self.manifest_digest)
 
 
 class TrainingRun(BaseModel):
+    """
+    Describes the training run that produced the artifact.
+
+    Only ``framework`` is required — it is the one field every training run has.
+    All other fields are optional but increase the evidential value of the
+    attestation when present.
+
+    This schema uses ``extra=allow`` because training environments vary widely
+    and teams should be able to record what they actually know without being
+    blocked by fields the schema has not yet anticipated. Unknown fields are
+    preserved in the attestation payload.
+
+    Guidance on specific fields:
+    - ``code_uri``: prefer ``repo_url@commit_sha`` form, e.g.
+      ``https://github.com/org/repo@abc1234``. This is what most teams have.
+    - ``code_digest``: sha256 of a repo tarball or training script archive.
+      Rare but valid. Do NOT put a git commit SHA here — git SHAs are not
+      sha256 file digests.
+    - ``environment_uri``: Docker image name + tag or OCI ref, e.g.
+      ``ghcr.io/org/training-env:v1.2``.
+    - ``environment_digest``: sha256 of the image manifest (from
+      ``docker inspect --format='{{index .RepoDigests 0}}'``). This is the
+      manifest digest, not a layer digest.
+    - ``compute``: free-form dict for GPU type, count, training hours, etc.
+      No schema enforcement — record what you have.
+    """
+
     framework: str
-    framework_version: str
-    code_digest: str
-    environment_digest: str
-    model_config = ConfigDict(extra="forbid")
+    """Training framework name. Required. Examples: 'PyTorch', 'JAX', 'TensorFlow'."""
+    framework_version: Optional[str] = None
+    """Framework version string, e.g. '2.3.0'."""
+    code_uri: Optional[str] = None
+    """URI of the training code, preferably with a pinned revision."""
+    code_digest: Optional[str] = None
+    """sha256:<hex> of a content-addressed training code artifact (e.g. repo tarball)."""
+    environment_uri: Optional[str] = None
+    """Docker image name+tag or OCI ref for the training environment."""
+    environment_digest: Optional[str] = None
+    """sha256:<hex> of the container image manifest."""
+    compute: Optional[Dict[str, Any]] = None
+    """Free-form compute details: GPU type, count, training hours, etc."""
+    model_config = ConfigDict(extra="allow")  # descriptive, not security-critical
 
     def model_post_init(self, __context: Any) -> None:
-        self.code_digest = normalize_sha256_digest(self.code_digest)
-        self.environment_digest = normalize_sha256_digest(self.environment_digest)
+        if self.code_digest is not None:
+            self.code_digest = normalize_sha256_digest(self.code_digest)
+        if self.environment_digest is not None:
+            self.environment_digest = normalize_sha256_digest(self.environment_digest)
 
 
 class TrainingPredicate(BaseModel):
-    parent_models: List[ParentModel] = Field(min_length=1)
+    """
+    Provenance predicate for a training or fine-tuning run.
+
+    ``parent_models`` defaults to an empty list — a model trained from scratch
+    (no parent) is a valid and important attestation target. Base models are the
+    roots of the lineage graph; they must be attestable.
+
+    ``training_run`` is the only required field. The minimum valid attestation
+    is ``{"training_run": {"framework": "PyTorch"}}`` — honest weak evidence
+    is better than fabricated strong evidence.
+
+    Evidence strength increases with each additional field. The path from weak
+    to strong attestation:
+      1. framework name only (Described tier)
+      2. + parent URIs and dataset URIs (Described → Identified)
+      3. + parent digests and dataset digests (Identified tier)
+      4. + code_uri, environment_uri (richer Identified)
+      5. + signed bundle (Attested tier)
+    """
+
+    parent_models: List[ParentModel] = Field(default_factory=list)
+    """Parent models this artifact was initialized from. Empty = trained from scratch."""
     datasets: List[DatasetRef] = Field(default_factory=list)
+    """Datasets used during training, fine-tuning, or alignment."""
     training_run: TrainingRun
+    """Training run context. Required."""
     hyperparameters: Dict[str, Any] = Field(default_factory=dict)
+    """Key training hyperparameters (learning rate, batch size, etc.)."""
+    notes: Optional[str] = None
+    """Free-text notes for anything that does not fit the structured fields."""
     model_config = ConfigDict(extra="forbid")
 
 
